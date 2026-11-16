@@ -427,7 +427,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h('div', { className: 'wb-field' },
               h('label', null,
                 '管理员私聊长任务档位',
-                h(Tip, { text: '开：管理员私聊多挂两套工具 —— 后台任务（长活丢后台，你先聊别的，跑完再取结果）和定时任务（让它到点自己干活）。关：一轮一答，长活会一直占着会话没法回你。群聊和普通成员不受影响，永远拿不到这两个。' })),
+                h(Tip, { text: '开：管理员私聊多挂两套工具 —— 后台任务（长活丢后台，你先聊别的，跑完再取结果）和定时任务（让它到点自己干活）。关：一轮一答，长活会一直占着会话没法回你。' })),
               h('div', { className: 'wb-switch-row' },
                 h(Switch, { on: !!cfg.longTasks, onChange: (v) => setD('longTasks', v) }),
                 h('span', { className: 'lbl' }, cfg.longTasks ? '开（有 jobs / schedule）' : '关（一轮一答）')))),
