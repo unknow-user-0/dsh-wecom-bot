@@ -24,6 +24,19 @@ const IMAGE_BUDGET = 1_400_000
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic'])
 
+
+/** 日志兼容：外面可能传 logger 对象（.info/.debug），也可能传 log(level, text) 函数 */
+function asLog(log) {
+  if (typeof log === 'function') return log
+  if (log && typeof log.info === 'function') {
+    return (level, text) => {
+      const fn = typeof log[level] === 'function' ? log[level] : log.info
+      try { fn.call(log, String(text ?? level)) } catch {}
+    }
+  }
+  return () => {}
+}
+
 export class SendFileError extends Error {
   constructor(message, code) {
     super(message)
@@ -55,7 +68,8 @@ async function uploadClient(mcpFor) {
  * @param {string} o.fileName
  * @param {'image'|'file'|'video'|'voice'} o.type
  */
-export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor, log = () => {} }) {
+export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor, log: logRaw = () => {} }) {
+  const log = asLog(logRaw)
   const picked = await uploadClient(mcpFor)
   if (!picked) {
     throw new SendFileError('没配 MCP 的 disk / mail / doc 服务，传不了文件。让管理员在设置里填一个。', 'no_mcp')
@@ -109,7 +123,8 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
  * @param {1|2} o.chatType
  * @param {string} [o.msgType]   不填按扩展名猜
  */
-export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFor, log = () => {} }) {
+export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFor, log: logRaw = () => {} }) {
+  const log = asLog(logRaw)
   const st = await stat(path).catch(() => null)
   if (!st || !st.isFile()) throw new SendFileError(`找不到文件：${path}`, 'no_file')
   if (st.size > MAX_FILE_BYTES) {
@@ -124,7 +139,7 @@ export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFo
   const type = msgType || (isImagePath(path) ? 'image' : 'file')
   const fileName = basename(path)
 
-  const up = await uploadMedia({ buffer, fileName, type }, { mcpFor, log })
+  const up = await uploadMedia({ buffer, fileName, type }, { mcpFor, log: logRaw })
 
   const msg = await mcpFor?.('msg')
   if (!msg) throw new SendFileError('没配 MCP 的 msg 服务，发不了文件。', 'no_msg_mcp')
@@ -148,8 +163,9 @@ export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFo
  * 发图片（Buffer 形式，比如生图结果）。
  * 走 MCP 的 message_aibot_send，因为长连接的 image 帧也要 media_id。
  */
-export async function sendImageBuffer({ buffer, chatId, chatType, fileName = 'image.png' }, { mcpFor, log = () => {} }) {
-  const up = await uploadMedia({ buffer, fileName, type: 'image' }, { mcpFor, log })
+export async function sendImageBuffer({ buffer, chatId, chatType, fileName = 'image.png' }, { mcpFor, log: logRaw = () => {} }) {
+  const log = asLog(logRaw)
+  const up = await uploadMedia({ buffer, fileName, type: 'image' }, { mcpFor, log: logRaw })
   const msg = await mcpFor?.('msg')
   if (!msg) throw new SendFileError('没配 MCP 的 msg 服务，发不了图片。', 'no_msg_mcp')
   try {
@@ -165,7 +181,8 @@ export async function sendImageBuffer({ buffer, chatId, chatType, fileName = 'im
  * 上传到微盘（超过单次上限时的唯一出路）。
  * 微盘单文件上限 20 GB，比窗口的 1 GB 宽松得多。
  */
-export async function uploadToDisk({ path, folderId }, { mcpFor, log = () => {} }) {
+export async function uploadToDisk({ path, folderId }, { mcpFor, log: logRaw = () => {} }) {
+  const log = asLog(logRaw)
   const disk = await mcpFor?.('disk')
   if (!disk) throw new SendFileError('没配 MCP 的 disk 服务，传不了微盘。', 'no_mcp')
   const st = await stat(path).catch(() => null)
