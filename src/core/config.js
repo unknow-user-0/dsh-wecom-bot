@@ -47,32 +47,12 @@ export const DEFAULTS = {
   },
   longTasks: false,        // 管理员私聊额外挂 jobs + schedule
 
-  // ---- 心情（只影响语气）----
-  mood: {
-    halfLifeHours: 72,     // 心情回落到基线的半衰期
-  },
-
-  // ---- 主动搭话（只对主人私聊）----
-  speakUp: {
-    enabled: false,        // 默认关：主动打扰人是强能力，由主人自己开
-    idleMinutes: 120,      // 主人多久没说话才去找他
-    minIntervalMinutes: 90,
-    maxIntervalMinutes: 240,
-    maxPerDay: 4,
-    awakeFrom: 8,
-    awakeTo: 23,
-    nudge: true,           // 她问了主人一句、主人没回，15~40 分钟后有一半机会轻轻追一句
-  },
-
   // ---- 能力开关（开源默认）----
   features: {
     browser: true,         // 浏览器操作（CDP）：默认开
     video: true,           // 看视频（dsh-video-storyboard）：默认开
     files: true,           // 收发文件/文档：默认开
     desktop: false,        // 桌面命令（shell/pwsh）：默认关，最危险
-    imageGen: false,
-    speakUp: false,        // 主动搭话
-    mood: true,            // 心情（只影响语气）
     memory: true,          // 记忆（自带实现）
     mcpWrite: false,       // MCP 写操作（建文档/发邮件/建待办）：默认关
     mcpSendAsMe: false,    // MCP 以管理员真人身份发消息：默认关，且需「用我的身份」闸门
@@ -87,17 +67,6 @@ export const DEFAULTS = {
     perChatDailyTokens: 5_000_000,  // 每会话 5 百万
     adminsUnlimited: true, // 管理员不限制
     burstPerMinute: 30,    // 防刷屏：单会话每分钟条数上限（辅助计量）
-  },
-
-  // ---- 生图（OpenAI 兼容 / 自定义接口）----
-  imageGen: {
-    enabled: false,
-    provider: 'openai',    // openai | custom
-    baseUrl: '',
-    model: '',
-    size: '1024x1024',
-    stylePrompt: '',       // 每次生成前拼在提示词前（统一画风）
-    custom: { method: 'POST', url: '', bodyType: 'json', responsePath: '', params: [] },
   },
 
   // ---- 模型 ----
@@ -180,13 +149,6 @@ function normalize(c) {
   c.quota.burstPerMinute = num(c.quota.burstPerMinute, 1, 1000, 30)
   c.history.maxMessages = num(c.history.maxMessages, 1, 200, 30)
   c.resync.maxMinutes = num(c.resync.maxMinutes, 5, 6 * 24 * 60, 120)
-  c.mood.halfLifeHours = num(c.mood.halfLifeHours, 1, 24 * 30, 72)
-  c.speakUp.idleMinutes = num(c.speakUp.idleMinutes, 10, 24 * 60, 120)
-  c.speakUp.minIntervalMinutes = num(c.speakUp.minIntervalMinutes, 10, 24 * 60, 90)
-  c.speakUp.maxIntervalMinutes = num(c.speakUp.maxIntervalMinutes, c.speakUp.minIntervalMinutes, 48 * 60, 240)
-  c.speakUp.maxPerDay = num(c.speakUp.maxPerDay, 0, 48, 4)
-  c.speakUp.awakeFrom = num(c.speakUp.awakeFrom, 0, 23, 8)
-  c.speakUp.awakeTo = num(c.speakUp.awakeTo, 0, 23, 23)
 
   // 管理员：保证 userid 非空、role 合法、只有一个 owner
   const seen = new Set()
@@ -238,7 +200,6 @@ export function publicConfig(c) {
     ),
   }))
   // 生图的 key 别往回吐 —— 前端只需要知道「配了没有」
-  if (out.imageGen) out.imageGen.apiKey = out.imageGen.apiKey ? '已配置' : ''
   return out
 }
 

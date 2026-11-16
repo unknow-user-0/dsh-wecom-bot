@@ -83,7 +83,7 @@ const fetchJson = async (p) => {
   return { json: async () => ROUTES[path] || { ok: false, message: 'no route ' + path } }
 }
 
-const TABS = ['概览', '连接', '管理员', '准入', '人格', '功能', '陪伴', '额度', '记忆', '日志']
+const TABS = ['概览', '连接', '管理员', '准入', '人格', '功能', '额度', '记忆', '日志']
 
 async function main() {
   mkdirSync(OUT, { recursive: true })

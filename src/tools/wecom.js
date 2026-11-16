@@ -10,7 +10,7 @@
 //        mcp send = 走 MCP，署名是授权真人，只给管理员且要「用我的身份」闸门
 
 import { defineTool, str, int, bool } from './define.js'
-import { sendLocalFile, sendImageBuffer, uploadToDisk, searchDisk, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { sendLocalFile, uploadToDisk, searchDisk, MAX_FILE_BYTES } from '../wecom/outbound.js'
 
 /**
  * @param {object} d deps
@@ -24,7 +24,7 @@ import { sendLocalFile, sendImageBuffer, uploadToDisk, searchDisk, MAX_FILE_BYTE
  * @param {Function} d.log
  */
 export function buildTools(d) {
-  const { getConfig, getClient, mcpFor, memory, chatOfSession, recentMessages, imagegen } = d  // 长连接客户端是连上之后才有的，工具得惰性取，不能在建工具时就绑死
+  const { getConfig, getClient, mcpFor, memory, chatOfSession, recentMessages } = d  // 长连接客户端是连上之后才有的，工具得惰性取，不能在建工具时就绑死
   const client = new Proxy({}, {
     get(_t, k) {
       const c = getClient?.() || null
@@ -60,7 +60,8 @@ export function buildTools(d) {
   tools.push(defineTool({
     name: 'wecom_send',
     description: [
-      '主动往指定会话或指定人发一条消息（不是回复当前这句）。',
+      '帮人转告：主动往指定的人或群里发一条消息（不是回复当前这句）。',
+      '典型用法：老大说「帮我转告张三，明天下午三点开会」，你就发给张三。',
       '协议硬限制：对方必须先跟机器人说过话，否则企微根本推不进去。',
       '所以能发的只有：正在聊的这个人、之前聊过的人、管理员。',
       '发不过去会明确报错，失败就如实说失败，不要假装发成功。',
@@ -326,39 +327,6 @@ export function buildTools(d) {
         if (!keyword) return { ok: false, message: '搜什么关键词？' }
         const r = await searchDisk(keyword, { mcpFor })
         return { ok: true, message: JSON.stringify(r).slice(0, 1500) }
-      } catch (error) {
-        return { ok: false, message: error.message }
-      }
-    },
-  }))
-
-  // ── 画图 ────────────────────────────────────────────────
-  // 生图要一两分钟，标 slow 让它先回一句「正在画」。
-  tools.push(defineTool({
-    name: 'wecom_draw',
-    description: [
-      '画一张图并直接发到当前企微会话。',
-      '只在管理员在设置里配好生图服务（OpenAI 兼容接口或自建接口）之后才能用。',
-      '一次画一张，需要多张就多次调用。',
-    ].join('\n'),
-    slow: '我画一下，大概要一两分钟。',
-    properties: {
-      prompt: str('画什么。写具体一点：主体、风格、构图、色调'),
-    },
-    required: ['prompt'],
-    execute: async ({ prompt }, exec) => {
-      if (!imagegen) return { ok: false, message: '生图模块没初始化。' }
-      if (!imagegen.enabled()) return { ok: false, message: '生图还没配好（设置 → 陪伴 → 生图）。' }
-      const chat = chatOfSession?.(exec?.sessionId)
-      if (!chat) return { ok: false, message: '这个会话不是企微来的。' }
-      try {
-        const img = await imagegen.generate(prompt)
-        const target = chat.kind === 'group' ? chat.chatId : chat.userId
-        await sendImageBuffer(
-          { buffer: img.buffer, chatId: target, chatType: chat.kind === 'group' ? 2 : 1, fileName: 'draw.png' },
-          { mcpFor, log: d.log },
-        )
-        return { ok: true, message: `画好了，已经发过去（${Math.round(img.buffer.length / 1024)} KB）。` }
       } catch (error) {
         return { ok: false, message: error.message }
       }

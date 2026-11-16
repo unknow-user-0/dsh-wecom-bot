@@ -282,7 +282,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         { id: 'access', label: '准入' },
         { id: 'persona', label: '人格' },
         { id: 'features', label: '功能' },
-        { id: 'companion', label: '陪伴' },
         { id: 'quota', label: '额度' },
         { id: 'memory', label: '记忆' },
         { id: 'logs', label: '日志' },
@@ -291,7 +290,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         connect: ['botId', 'botName', 'longTasks'],
         access: ['accessMode', 'allow', 'autoRegister', 'merge', 'workspaceDir'],
         features: ['features', 'history', 'resync'],
-        companion: ['mood', 'speakUp', 'imageGen'],
         quota: ['quota'],
         persona: ['persona'],
       }
@@ -300,7 +298,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const P = { st, cfg, draft, setD, services, toast, reload, save, quickToggle, setWizard }
       const body = {
         overview: Overview, connect: Connect, admins: Admins, access: Access, persona: Persona,
-        features: Features, companion: Companion, quota: Quota, memory: Memory, logs: Logs,
+        features: Features, quota: Quota, memory: Memory, logs: Logs,
       }[tab] || Overview
 
       return h('div', { className: 'wb-root' },
@@ -653,9 +651,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         ['video', '看视频', '依赖 dsh-video-storyboard，还要 ffmpeg。缺了会自动降级，不报错。'],
         ['files', '文件收发', '走 MCP 的 media_upload + message_aibot_send。单次 20 MB 以内，更大的走微盘。'],
         ['memory', '记忆', '四层记忆（人 / 场景 / 技能 / 公共），跨场景召回会标来源。'],
-        ['mood', '心情', '只影响语气，不影响权限。'],
-        ['imageGen', '生图', '要额外的生图后端，没配就不显示这个能力。'],
-        ['speakUp', '主动搭话', '安静久了主动说一句。能用 aibot_send_msg 主动推的只有聊过天的人。'],
         ['mcpWrite', 'MCP 写操作', '文档/待办/日程/微盘的增改。关了就只能读。'],
         ['mcpSendAsMe', '以管理员身份发消息', '署名是真人不是机器人。只在管理员明确说了「用我的身份」时才该开。'],
         ['desktop', '桌面控制', '本插件**没有**这个能力（只有 shell 与浏览器），开着也没用，留着是为了跟别人对齐。'],
@@ -768,213 +763,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           h('div', null, title),
           desc ? h('div', { className: 'wb-dim wb-small' }, desc) : null),
         right)
-    }
-
-    function Companion({ draft, setD, toast }) {
-      const [mood, setMood] = useState(null)
-      const [sp, setSp] = useState(null)
-      const [ig, setIg] = useState(null)
-
-      const loadMood = useCallback(async () => {
-        const r = await get('/mood')
-        if (r?.ok) setMood(r.mood)
-      }, [])
-      const loadSp = useCallback(async () => {
-        const r = await get('/speakup/state')
-        if (r?.ok) setSp(r)
-      }, [])
-      const loadIg = useCallback(async () => {
-        const r = await get('/imagegen')
-        if (r?.ok) setIg(r)
-      }, [])
-      useEffect(() => {
-        loadMood().catch(() => {})
-        loadSp().catch(() => {})
-        loadIg().catch(() => {})
-      }, [loadMood, loadSp, loadIg])
-
-      const m = mood || { value: 60, label: '平平常常', history: [] }
-      const pct = Math.max(0, Math.min(100, Math.round(Number(m.value) || 0)))
-      const barColor = pct >= 70 ? 'var(--wb-brand)' : pct >= 50 ? '#e8b339' : '#d9534f'
-      const igc = draft.imageGen || {}
-      const custom = igc.custom || {}
-      const isCustom = igc.provider === 'custom'
-
-      const moodCard = h(Card, {
-        title: '心情',
-        hint: '只影响语气，不影响权限和能力。不做模型判心情（每轮多打一次模型太贵），按关键词 + 时间衰减算。',
-        right: h(Btn, {
-          sm: true, kind: 'ghost',
-          onClick: async () => { await post('/mood/reset'); toast('归零了', 'ok'); loadMood().catch(() => {}) },
-        }, '重置'),
-      },
-        h(Row, {
-          title: m.label,
-          desc: '数值 ' + pct + ' / 100 · 越高越飘',
-          right: h(Switch, { on: !!draft.features?.mood, onChange: (v) => setD('features.mood', v) }),
-        }),
-        h('div', { style: { height: 10, background: 'var(--dsw-alias-bg-base)', borderRadius: 6, overflow: 'hidden', margin: '10px 0' } },
-          h('div', { style: { width: pct + '%', height: '100%', background: barColor, transition: 'width .3s' } })),
-        h('div', { className: 'wb-grid' },
-          h(Field, { label: '衰减半衰期（小时）', tip: '1 ~ 720。意思是不说话多久掉一半。' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '1', max: '720',
-              value: draft.mood?.halfLifeHours ?? 72,
-              onChange: (e) => setD('mood.halfLifeHours', Number(e.target.value)),
-            }))),
-        (m.history || []).length
-          ? h('div', { className: 'wb-list', style: { marginTop: 10 } },
-            m.history.slice(-8).reverse().map((x, i) => h('div', { key: i, className: 'wb-item' },
-              h('span', { className: cx('wb-tag', (x.d || 0) >= 0 ? 'ok' : '') }, (x.d >= 0 ? '+' : '') + (x.d ?? 0)),
-              h('div', { className: 'main' },
-                h('div', { className: 't' }, x.reason || '—'),
-                h('div', { className: 'd' }, [x.who, timeAgo(x.at)].filter(Boolean).join(' · '))))))
-          : null)
-
-      const spState = (sp && sp.state) || {}
-      const speakCard = h(Card, {
-        title: '主动搭话',
-        hint: '只对主人做，不给普通成员。企微规定：只有对方先给机器人发过消息，机器人才推得进去。',
-        right: h(Btn, {
-          sm: true, kind: 'ghost',
-          onClick: async () => {
-            const r = await post('/speakup/fire')
-            toast(r?.message || '发出去了', r?.ok ? 'ok' : 'err')
-            loadSp().catch(() => {})
-          },
-        }, '现在就叫她'),
-      },
-        h(Row, {
-          title: '启用',
-          desc: '安静太久时自己找话说',
-          right: h(Switch, { on: !!draft.speakUp?.enabled, onChange: (v) => setD('speakUp.enabled', v) }),
-        }),
-        h(Row, {
-          title: '问了没回就追一句',
-          desc: '15 ~ 40 分钟后，一半概率，不占每天次数',
-          right: h(Switch, { on: draft.speakUp?.nudge !== false, onChange: (v) => setD('speakUp.nudge', v) }),
-        }),
-        h('div', { className: 'wb-grid', style: { marginTop: 12 } },
-          h(Field, { label: '安静多少分钟才开口', tip: '10 ~ 1440' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '10', max: '1440',
-              value: draft.speakUp?.idleMinutes ?? 120,
-              onChange: (e) => setD('speakUp.idleMinutes', Number(e.target.value)),
-            })),
-          h(Field, { label: '两次之间至少隔（分钟）', tip: '10 ~ 1440' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '10', max: '1440',
-              value: draft.speakUp?.minIntervalMinutes ?? 90,
-              onChange: (e) => setD('speakUp.minIntervalMinutes', Number(e.target.value)),
-            })),
-          h(Field, { label: '最多隔多久（分钟）', tip: '要 ≥ 上一个' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '10', max: '2880',
-              value: draft.speakUp?.maxIntervalMinutes ?? 240,
-              onChange: (e) => setD('speakUp.maxIntervalMinutes', Number(e.target.value)),
-            })),
-          h(Field, { label: '一天最多几次', tip: '0 ~ 48' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '0', max: '48',
-              value: draft.speakUp?.maxPerDay ?? 4,
-              onChange: (e) => setD('speakUp.maxPerDay', Number(e.target.value)),
-            })),
-          h(Field, { label: '几点到几点（开始）', tip: '0 ~ 23，可以跨夜' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '0', max: '23',
-              value: draft.speakUp?.awakeFrom ?? 8,
-              onChange: (e) => setD('speakUp.awakeFrom', Number(e.target.value)),
-            })),
-          h(Field, { label: '几点到几点（结束）', tip: '0 ~ 23' },
-            h('input', {
-              className: 'wb-input', type: 'number', min: '0', max: '23',
-              value: draft.speakUp?.awakeTo ?? 23,
-              onChange: (e) => setD('speakUp.awakeTo', Number(e.target.value)),
-            }))),
-        sp
-          ? h('div', { className: 'wb-row', style: { marginTop: 10 } },
-            h('span', { className: 'wb-tag' }, '今天 ' + (spState.count || 0) + ' 次'),
-            h('span', { className: 'wb-tag' }, '下次最早 ' + (spState.nextAt ? new Date(spState.nextAt).toLocaleTimeString() : '—')),
-            spState.last ? h('span', { className: 'wb-tag' }, '上次 ' + timeAgo(spState.last)) : null)
-          : null)
-
-      const openaiFields = h('div', { className: 'wb-grid' },
-        h(Field, { label: 'Base URL', tip: '不含 /images/generations' },
-          h('input', {
-            className: 'wb-input wb-mono', value: igc.baseUrl || '', placeholder: 'https://api.openai.com/v1',
-            onChange: (e) => setD('imageGen.baseUrl', e.target.value),
-          })),
-        h(Field, { label: '模型' },
-          h('input', {
-            className: 'wb-input wb-mono', value: igc.model || '', placeholder: 'gpt-image-1',
-            onChange: (e) => setD('imageGen.model', e.target.value),
-          })),
-        h(Field, { label: 'API Key', tip: igc.apiKey === '已配置' ? '已存，留空表示不改' : '只存在本机凭据库里' },
-          h('input', {
-            className: 'wb-input wb-mono', type: 'password',
-            value: igc.apiKey === '已配置' ? '' : (igc.apiKey || ''),
-            placeholder: igc.apiKey === '已配置' ? '已配置（留空不改）' : 'sk-…',
-            onChange: (e) => setD('imageGen.apiKey', e.target.value),
-          })),
-        h(Field, { label: '尺寸' },
-          h('input', {
-            className: 'wb-input wb-mono', value: igc.size || '1024x1024',
-            onChange: (e) => setD('imageGen.size', e.target.value),
-          })))
-
-      const customFields = h('div', null,
-        h('div', { className: 'wb-grid' },
-          h(Field, { label: '方法' },
-            h('select', {
-              className: 'wb-select', value: custom.method || 'POST',
-              onChange: (e) => setD('imageGen.custom.method', e.target.value),
-            }, h('option', { value: 'POST' }, 'POST'), h('option', { value: 'GET' }, 'GET'))),
-          h(Field, { label: 'Body 类型' },
-            h('select', {
-              className: 'wb-select', value: custom.bodyType || 'json',
-              onChange: (e) => setD('imageGen.custom.bodyType', e.target.value),
-            }, h('option', { value: 'json' }, 'JSON'), h('option', { value: 'form' }, 'Form')))),
-        h('div', { style: { height: 10 } }),
-        h(Field, { label: 'URL', tip: '要带 {{prompt}} 占位符，或者靠下面的参数传' },
-          h('input', {
-            className: 'wb-input wb-mono', value: custom.url || '', placeholder: 'https://example.com/draw?q={{prompt}}',
-            onChange: (e) => setD('imageGen.custom.url', e.target.value),
-          })),
-        h('div', { style: { height: 10 } }),
-        h(Field, { label: '返回值里图片在哪（点路径）', tip: '比如 data.0.url / images.0；留空就自己找' },
-          h('input', {
-            className: 'wb-input wb-mono', value: custom.responsePath || '', placeholder: 'data.0.url',
-            onChange: (e) => setD('imageGen.custom.responsePath', e.target.value),
-          })))
-
-      const imageCard = h(Card, {
-        title: '生图',
-        hint: '要么填 OpenAI 兼容的接口，要么填一个自己的。没配就不显示这能力，不影响别的。',
-        right: h(Switch, { on: !!draft.imageGen?.enabled, onChange: (v) => setD('imageGen.enabled', v) }),
-      },
-        h('div', { className: 'wb-row', style: { marginBottom: 10 } },
-          h('div', { className: 'wb-seg' },
-            h('button', {
-              type: 'button', className: cx(!isCustom && 'on'),
-              onClick: () => setD('imageGen.provider', 'openai'),
-            }, 'OpenAI 兼容'),
-            h('button', {
-              type: 'button', className: cx(isCustom && 'on'),
-              onClick: () => setD('imageGen.provider', 'custom'),
-            }, '自建接口'))),
-        isCustom ? customFields : openaiFields,
-        h('div', { style: { height: 10 } }),
-        h(Field, { label: '画风补充（可选）', tip: '会接在用户描述后面，比如「日系插画，柔和光线」' },
-          h('input', {
-            className: 'wb-input', value: igc.stylePrompt || '',
-            onChange: (e) => setD('imageGen.stylePrompt', e.target.value),
-          })),
-        ig
-          ? h('div', { className: 'wb-row', style: { marginTop: 10 } },
-            h('span', { className: cx('wb-tag', ig.enabled ? 'ok' : '') }, ig.enabled ? '后端就绪' : '还没配好'))
-          : null)
-
-      return h('div', { className: 'wb-page' }, moodCard, speakCard, imageCard)
     }
 
     // ---------------- 日志 ----------------

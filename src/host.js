@@ -32,9 +32,6 @@ import { buildTools } from './tools/wecom.js'
 import { buildBrowserTools } from './tools/browser.js'
 import { buildVideoTools } from './tools/video.js'
 import { createBrowserManager } from './browser/manager.js'
-import { createMood } from './companion/mood.js'
-import { createSpeakUp } from './companion/speakup.js'
-import { createImageGen } from './companion/imagegen.js'
 
 export const name = 'wecom-bot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt']
@@ -83,9 +80,6 @@ export function apply(ctx) {
   ctx.effect(() => () => { try { browser.shutdown() } catch {} }, 'wecom-bot: 关浏览器')
 
   // ---------- 心情与主动搭话 ----------
-  const mood = createMood({ getConfig, dataDir: DATA_DIR })
-  const imagegen = createImageGen({ getConfig, log: logger.child('imagegen') })
-  let speakUp = null
 
   // ---------- MCP 客户端池 ----------
   const mcpPool = new Map() // ref → client
@@ -233,20 +227,17 @@ export function apply(ctx) {
       const text = st.lastTurn === d.turn ? st.text : ''
       const frame = st.frame
       turnState.delete(sid)
-      // 这一轮是她自己主动找主人（没有回调帧）→ 走主动推送
-      const proactive = !frame
       if (!completed) {
         const detail = String(d.reason?.error?.message || d.reason?.failure?.message || '').replace(/\s+/g, ' ').slice(0, 180)
         log.warn(`${st.chat.chatId} 这一轮没正常结束（${d.reason?.kind || '?'}${detail ? '：' + redact(detail) : ''}）`)
-        if (!proactive) void replyTo(frame, '这次没跑完，出错了。再试一次？')
+        void replyTo(frame, '这次没跑完，出错了。再试一次？')
         return
       }
       if (isSilence(text)) {
         log.info(`${st.chat.chatId} 这一轮不说话`)
-        if (!proactive) void replyTo(frame, '', true)
+        void replyTo(frame, '', true)
         return
       }
-      if (proactive) { void pushTo(st.chat, clip(text)); return }
       void replyTo(frame, clip(text))
     }
   }
@@ -275,57 +266,6 @@ export function apply(ctx) {
     }
   }
 
-  // ---------- 主动搭话：把一段系统提醒送进主人私聊，等模型说完再推出去 ----------
-  //
-  // 走的是「未请求的推送」这条路：企微的 aibot_send_msg 只能在**已激活**的会话里推
-  // （用户先给机器人发过消息才有会话实体）。所以这里必须先确认主人私聊会话存在过。
-  const ownerChat = () => {
-    const owner = cfg.admins.find((a) => a.role === 'owner')
-    if (!owner) return null
-    return { kind: 'dm', chatId: owner.userid, userId: owner.userid, displayName: owner.name || '', isAdmin: true }
-  }
-  /** 主人上次跟自己说话的时间（用于「多久没理我了」） */
-  const lastOwnerTalkAt = () => {
-    const owner = cfg.admins.find((a) => a.role === 'owner')
-    if (!owner) return 0
-    const rows = recentEntries(200, { chatId: owner.userid })
-    const last = rows.find((r) => r.kind === 'in')
-    return last?.at || 0
-  }
-
-  async function deliverToOwner(promptText, reason) {
-    if (!cfg.enabled) return false
-    const chat = ownerChat()
-    if (!chat) { log.warn('没有主人，主动搭话跳过'); return false }
-    // 会话必须已经存在（企微那边必须有过会话实体，否则推送一定失败）
-    if (!hub.existingSessionId(chat)) {
-      log.info(`主人私聊还没激活过（${reason}），主动搭话跳过`)
-      return false
-    }
-    const info = await hub.agentFor(chat)
-    const sid = info.sessionId
-    sessionChat.set(sid, chat)
-    try { mountTools(info.agent, chat, info.level, sid) } catch {}
-    // 记一个「这一轮不是回复某条消息」的状态：frame 为 null，出话来就主动推
-    turnState.set(sid, { chat, frame: null, text: '', lastTurn: -1, startedAt: Date.now(), active: true })
-    await hub.prompt(chat, promptText)
-    return true
-  }
-
-  /** 主动推一条给某个会话（不依赖回调 req_id）。 */
-  async function pushTo(chat, text) {
-    if (cfg.dryRun) { log.info(`[试运行] 本该主动推给 ${chat.chatId}：${text.slice(0, 200)}`); return false }
-    if (!client?.connected) { log.warn('长连接没连上，主动推失败'); return false }
-    try {
-      await client.send(chat.chatId, chat.kind === 'group' ? 2 : 1, { msgtype: 'markdown', markdown: { content: text } })
-      recordActivity({ kind: 'out', chatId: chat.chatId, name: chat.displayName || '', text })
-      return true
-    } catch (error) {
-      log.warn(`主动推失败（${chat.chatId}）：${error.message}`)
-      return false
-    }
-  }
-
   // ---------- 记忆上下文（每轮拼一小段）----------
   function contextText() {
     try {
@@ -340,16 +280,9 @@ export function apply(ctx) {
     } catch { return '' }
   }
 
-  /** 每轮拼的一小段上下文：记忆提示 + 心情语气（都短） */
-  function contextLineOf(chat) {
-    const parts = []
-    const mem = contextText()
-    if (mem) parts.push(mem)
-    try {
-      const m = mood.contextLine()
-      if (m) parts.push(m)
-    } catch {}
-    return parts.join('\n')
+  /** 每轮拼的一小段上下文（记忆提示，很短） */
+  function contextLineOf() {
+    return contextText()
   }
 
   // ---------- 收消息 ----------
@@ -408,11 +341,6 @@ export function apply(ctx) {
 
     // 记下这一轮的状态：等 turn/end 再发
     turnState.set(sid, { chat, frame, text: '', lastTurn: -1, startedAt: Date.now(), said: merged })
-
-    // 心情：听一听这句话。私聊算满，群里没被 @ 的话只算三成（这一轮本来也只有 @ 才进来）。
-    try {
-      mood.observe(merged, chat.displayName || chat.name || chat.userId, { direct: true, owner: isAdmin })
-    } catch {}
 
     // 附件
     const attachments = []
@@ -604,7 +532,6 @@ export function apply(ctx) {
     chatOfSession,
     recentMessages: (chatId, limit) => recentEntries(limit, { chatId }).reverse(),
     activity: recordActivity,
-    imagegen,
     // 「以我的身份发」的闸门要读管理员这一轮的原话
     lastText: (sid) => turnState.get(sid)?.said || '',
     log,
@@ -733,8 +660,6 @@ export function apply(ctx) {
     const patch = body.config && typeof body.config === 'object' ? body.config : body
     const next = { ...cfg, ...patch }
     delete next.secret
-    // 前端拿到的是「已配置」占位，别把占位符写回去
-    if (next.imageGen && next.imageGen.apiKey === '已配置') next.imageGen.apiKey = cfg.imageGen?.apiKey || ''
     // 密钥单独收，不进 config
     if (typeof body.secret === 'string' && body.secret.trim()) {
       await secrets.set('WECOM_BOT_SECRET', body.secret.trim())
@@ -913,43 +838,6 @@ export function apply(ctx) {
     for (const [k, chat] of sessionChat) { sessionChat.delete(k); mounted.delete(k) }
     return { ok: true, message: `已经重置 ${n} 个会话映射（下次来消息会重开）` }
   })
-
-  // ---------- 主动搭话：定时器 ----------
-  // 只在主人私聊里做。企微的推送前提是「用户先找过机器人」，所以 deliverToOwner 会先确认
-  // 主人私聊会话真的存在过 —— 不存在就直接跳过，不硬推。
-  speakUp = createSpeakUp({
-    getConfig,
-    dataDir: DATA_DIR,
-    log: logger.child('speakup'),
-    deliver: deliverToOwner,
-    idleMinutesOf: () => {
-      const at = lastOwnerTalkAt()
-      if (!at) return 9999
-      return Math.round((Date.now() - at) / 60_000)
-    },
-  })
-  ctx.effect(() => {
-    const t = setInterval(() => {
-      Promise.resolve()
-        .then(() => speakUp.tick())
-        .catch((error) => log.debug(`主动搭话 tick 出错：${error.message}`))
-    }, 60_000)
-    t.unref?.()
-    return () => clearInterval(t)
-  }, 'wecom-bot: 主动搭话')
-
-  // ---------- 心情 / 主动搭话 / 生图 的面板接口 ----------
-  route('/mood', () => ({ ok: true, mood: mood.state() }))
-  route('/mood/reset', () => { mood.reset(); return { ok: true, mood: mood.state() } })
-  route('/speakup/state', () => ({ ok: true, state: speakUp?.state?.() || {}, enabled: Boolean(speakUp?.enabled?.()) }))
-  route('/speakup/fire', async () => {
-    if (!cfg.enabled) return { ok: false, message: '先打开总开关' }
-    if (!cfg.features.speakUp) return { ok: false, message: '功能里的「主动搭话」还没开' }
-    if (!speakUp) return { ok: false, message: '主动搭话还没初始化' }
-    const ok = await speakUp.fire('手动')
-    return { ok, message: ok ? '叫她去找你了，等她自己说' : '没发出去，看日志' }
-  })
-  route('/imagegen', () => ({ ok: true, enabled: imagegen.enabled(), config: { ...cfg.imageGen, apiKey: cfg.imageGen.apiKey ? '已配置' : '' } }))
 
   /** 支持 /config 里包含的 mcp 结构化更新 */
   ctx.effect(() => ctx.webServer.register({
