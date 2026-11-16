@@ -18,6 +18,14 @@ import { DATA_DIR } from '../core/config.js'
 
 const MAP_FILE = join(DATA_DIR, 'sessions.json')
 
+/** 工作区标题（面板里那个分组名） */
+export const WORKSPACE_TITLE = '企业微信 · AI'
+
+/** 工作区目录：配置里有就用配置的，否则 ~/WeComBot/chats。改了配置下次自动切过去。 */
+export const workspaceDirOf = (cfg) =>
+  String(cfg?.workspaceDir || '').trim() ||
+  join(process.env.USERPROFILE || process.env.HOME || '.', 'WeComBot', 'chats')
+
 /** 会话 key：channel:kind:chatId —— 加通道后不会撞（智能机器人和自建应用同一个群给不同 ID） */
 export function sessionKeyOf(channel, kind, chatId) {
   return `${channel}:${kind}:${chatId}`
@@ -65,20 +73,26 @@ export function createHub({ ctx, log, getConfig }) {
   }
 
   // ---------- 工作区 ----------
+  // 一个插件一个工作区，所有企微会话都落在里面。
+  // 按「路径」认已有工作区，不按标题 —— 路径才是工作区的身份，
+  // 面板里改 workspaceDir 之后会自动指向新目录，不会两套工作区打架。
   let wsCache = null
+  const normPath = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase()
   async function ensureWorkspace() {
-    if (wsCache) return wsCache
     const cfg = getConfig()
-    const dir = cfg.workspaceDir || join(process.env.USERPROFILE || process.env.HOME || '.', 'WeComBot', 'chats')
+    const dir = workspaceDirOf(cfg)
+    // 改了目录就得重新找 —— 缓存绑的是上一个路径
+    if (wsCache && normPath(wsCache.path) === normPath(dir)) return wsCache
     try { if (!existsSync(dir)) mkdirSync(dir, { recursive: true }) } catch {}
     const reg = dsh.get?.('workspaceRegistry') || dsh.workspaceRegistry
     if (!reg) throw new Error('宿主没有 workspaceRegistry')
-    const title = '企业微信 · AI'
-    const all = typeof reg.list === 'function' ? await reg.list() : []
-    let found = (all || []).find((w) => w && (w.title === title || w.name === title))
+    const all = typeof reg.list === 'function' ? (await reg.list()) || [] : []
+    let found = all.find((w) => normPath(w?.path) === normPath(dir))
     if (!found) {
       if (typeof reg.create !== 'function') throw new Error('workspaceRegistry 没有 create')
-      found = await reg.create({ title, dir, path: dir })
+      // 宿主签名是位置参数 create(path, title)，传对象会炸在 path 类型检查上
+      found = await reg.create(dir, WORKSPACE_TITLE)
+      log.info(`建好了工作区「${WORKSPACE_TITLE}」：${dir}`)
     }
     wsCache = found
     return found
@@ -231,6 +245,16 @@ export function createHub({ ctx, log, getConfig }) {
     return { agent, sessionId, level, config: cfg }
   }
 
+  /**
+   * 忘掉所有会话映射。工作区目录改了之后用：老的 DSH 会话还在老工作区里、侧栏能看到，
+   * 但映射清掉之后，下一条消息会在新工作区里重新建会话 —— 不然会把新消息塞回老工作区的会话里。
+   */
+  function forgetSessions() {
+    saveMap({ chats: {} })
+    log.info('会话映射已清空（下次来消息会在当前工作区重开）')
+    return true
+  }
+
   return {
     agentFor,
     prompt,
@@ -239,6 +263,8 @@ export function createHub({ ctx, log, getConfig }) {
     levelFor,
     presetFor,
     ensureWorkspace,
+    forgetSessions,
+    workspaceDir: () => workspaceDirOf(getConfig()),
     sessionMap: () => loadMap().chats,
   }
 }

@@ -9,8 +9,8 @@
 //
 // ⚠ 安全默认：总开关关、试运行开。不手动打开，一句都不会真的发到企微。
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join, dirname, basename } from 'node:path'
+import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { join, dirname, basename, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
@@ -22,7 +22,7 @@ import { createVault, mcpRef } from './core/vault.js'
 import { checkQuota, addUsage, tickMinute, usageSnapshot, resetUsage, estimateTokens } from './core/quota.js'
 import { createWecomClient, WecomApiError, WecomUncertainError } from './wecom/client.js'
 import { createMcpClient, MCP_SERVICES, validateMcpUrl } from './wecom/mcp.js'
-import { createHub } from './chat/hub.js'
+import { createHub, WORKSPACE_TITLE } from './chat/hub.js'
 import { checkAccess, autoRegister, deniedReply } from './chat/access.js'
 import { createMerger } from './chat/merge.js'
 import { normalizeInbound, attachInboundImage, attachInboundFile } from './chat/inbound.js'
@@ -44,6 +44,9 @@ const PKG = (() => { try { return JSON.parse(readFileSync(join(ROOT, 'package.js
 const VERSION = PKG.version
 const PREFIX = '/wecom-bot/api'
 const nodeRequire = createRequire(import.meta.url)
+
+/** existsSync 的静默版：沙箱没权限时当不存在处理，别把面板请求打挂 */
+const safeExists = (p) => { try { return existsSync(p) } catch { return false } }
 
 /** 模型这一轮不想说话时的约定 */
 const SILENCE = '[沉默]'
@@ -828,6 +831,72 @@ export function apply(ctx) {
     }
   })
   route('/sessions', () => ({ ok: true, rows: Object.entries(hub.sessionMap()).map(([k, v]) => ({ key: k, ...v })) }))
+
+  // ---------- 工作区目录迁移 ----------
+  // 企微会话都落在同一个工作区里，工作区按「路径」认身份。
+  // 换目录 = 换个工作区，老会话不会消失（还挂在老工作区里、侧栏能看到），
+  // 新消息起在新目录。想彻底重来就去「重置会话」。
+  route('/workspace', () => ({
+    ok: true,
+    dir: hub.workspaceDir(),
+    title: WORKSPACE_TITLE,
+    exists: safeExists(hub.workspaceDir()),
+  }))
+
+  route('/workspace/check', async (req) => {
+    const body = await readBody(req)
+    const dir = String(body.dir || '').trim()
+    if (!dir) return { ok: false, message: '要填一个目录' }
+    if (!isAbsolute(dir)) return { ok: false, message: '请填绝对路径（比如 D:\\WeComBot\\chats）' }
+    const exists = safeExists(dir)
+    let writable = false
+    let message = ''
+    try {
+      mkdirSync(dir, { recursive: true })
+      const probe = join(dir, '.write-test')
+      writeFileSync(probe, 'ok')
+      rmSync(probe, { force: true })
+      writable = true
+    } catch (error) {
+      message = error.message
+    }
+    if (!writable) return { ok: false, dir, exists, message: `这个目录写不进去：${message}` }
+    return { ok: true, dir, exists, message: exists ? '目录已存在，可以写' : '目录不存在，迁移时会创建' }
+  })
+
+  route('/workspace/migrate', async (req) => {
+    const body = await readBody(req)
+    // 去掉结尾的斜杠再比 —— 否则 "D:\chats\" 和 "D:\chats" 会被当成两个工作区
+    const dir = String(body.dir || '').trim().replace(/[\\/]+$/, '')
+    if (!dir) return { ok: false, message: '要填一个目录' }
+    if (!isAbsolute(dir)) return { ok: false, message: '请填绝对路径' }
+    const before = String(hub.workspaceDir() || '').replace(/[\\/]+$/, '')
+    if (before.toLowerCase() === dir.toLowerCase()) return { ok: true, message: '目录没变', dir, moved: 0 }
+
+    try { mkdirSync(dir, { recursive: true }) } catch (error) {
+      return { ok: false, message: `目录建不出来：${error.message}` }
+    }
+
+    // 1) 写配置（必须走 setConfig —— 直接 saveConfig 只落盘不更新内存里的 cfg）
+    // 工作区缓存按新路径重新找（或新建）
+    setConfig({ ...cfg, workspaceDir: dir })
+
+    // 2) 清掉内存里的会话映射，让下一条消息在新工作区里开新会话
+    let moved = 0
+    for (const [k] of sessionChat) { sessionChat.delete(k); mounted.delete(k); moved++ }
+    for (const sid of [...turnState.keys()]) turnState.delete(sid)
+    hub.forgetSessions()
+
+    log.info(`工作区目录已迁移：${before} → ${dir}（清掉 ${moved} 个会话映射）`)
+    return {
+      ok: true,
+      dir,
+      before,
+      moved,
+      message: `已切到「${dir}」。老的会话还在「${WORKSPACE_TITLE}」工作区里能看到，下次有人发消息会在新目录里开新会话。`,
+    }
+  })
+
   route('/test-send', async (req) => {
     const body = await readBody(req)
     if (!client || !client.connected) return { ok: false, message: '长连接没连上' }

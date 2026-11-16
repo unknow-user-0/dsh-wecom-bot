@@ -130,7 +130,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 .wb-tag.warn{background:rgba(191,135,0,.10);border-color:rgba(191,135,0,.24);color:var(--wb-warn)}
 .wb-tag.err{background:rgba(207,34,46,.10);border-color:rgba(207,34,46,.24);color:var(--wb-err)}
 .wb-tag.brand{background:var(--wb-tint);border-color:var(--wb-tint-2);color:var(--wb-deep)}
-.wb-muted{color:var(--wb-sub)}.wb-dim{color:var(--wb-dim)}.wb-small{font-size:12px}
+.wb-muted{color:var(--wb-sub)}.wb-dim{color:var(--wb-dim)}.wb-small{font-size:12px}.wb-err{color:var(--wb-err)}
 .wb-mono{font-family:var(--dsh-font-family-mono,ui-monospace,monospace);font-size:12px}
 .wb-list{display:flex;flex-direction:column;gap:8px}
 .wb-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--wb-line);border-radius:11px;background:var(--wb-card)}
@@ -489,7 +489,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 准入 ----------------
-    function Access({ cfg, draft, setD }) {
+    function Access({ cfg, draft, setD, toast, reload }) {
       const [uid, setUid] = useState('')
       const [gid, setGid] = useState('')
       return h('div', { className: 'wb-page' },
@@ -549,9 +549,60 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               h('input', { className: 'wb-input', type: 'number', min: '1', max: '60', value: draft.merge?.groupMaxSec ?? 15, onChange: (e) => setD('merge.groupMaxSec', Number(e.target.value)) })),
             h(Field, { label: '等待时的占位话', tip: '第一条消息先回这个，让对方知道收到了' },
               h('input', { className: 'wb-input', value: draft.merge?.placeholder || '', placeholder: 'emmm...', onChange: (e) => setD('merge.placeholder', e.target.value) })))),
-        h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话。留空就放在用户目录下的 WeComBot\\chats。' },
-          h(Field, { label: '工作区目录' },
-            h('input', { className: 'wb-input wb-mono', value: draft.workspaceDir || '', placeholder: '留空 = %USERPROFILE%\\WeComBot\\chats', onChange: (e) => setD('workspaceDir', e.target.value) }))))
+        h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话，全都落在一个工作区里，侧栏能看到。' },
+          h(WorkspaceMigrate, { toast, reload })))
+    }
+
+    // ---------------- 工作目录迁移 ----------------
+    // 工作区按「路径」认身份：换目录 = 换个工作区。
+    // 老会话不会消失（还在老工作区里，侧栏能看到），下次有人发消息会在新目录里开新会话。
+    function WorkspaceMigrate({ toast, reload }) {
+      const [info, setInfo] = useState(null)
+      const [dir, setDir] = useState('')
+      const [probe, setProbe] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        const r = await get('/workspace')
+        if (r?.ok) { setInfo(r); setDir((d) => d || r.dir || '') }
+      }, [])
+      useEffect(() => { void load() }, [load])
+      const check = async () => {
+        if (!dir.trim()) return toast('先填个目录', 'err')
+        setBusy(true)
+        const r = await post('/workspace/check', { dir: dir.trim() })
+        setBusy(false)
+        setProbe(r)
+        toast(r?.message || (r?.ok ? '目录可用' : '目录不可用'), r?.ok ? 'ok' : 'err')
+      }
+      const migrate = async () => {
+        if (!dir.trim()) return toast('先填个目录', 'err')
+        if (!probe?.ok) return toast('先点「检查目录」确认能写', 'err')
+        if (!window.confirm('切到「' + dir.trim() + '」？\n\n老会话还在老工作区里能看到，但下次有人发消息会在新目录里开新会话。')) return
+        setBusy(true)
+        const r = await post('/workspace/migrate', { dir: dir.trim() })
+        setBusy(false)
+        if (r?.ok) { toast(r.message || '已迁移', 'ok'); void load(); void reload() }
+        else toast(r?.message || '迁移失败', 'err')
+      }
+      return h('div', null,
+        h(Row, {
+          title: '当前工作区目录',
+          desc: info ? info.title + (info.exists ? '' : '（目录还不存在）') : '读取中…',
+          right: h('span', { className: 'wb-mono wb-small' }, info?.dir || '—'),
+        }),
+        h(Field, { label: '新目录', tip: '绝对路径。换目录 = 换工作区；老的会话不会丢，还在老工作区里。' },
+          h('input', {
+            className: 'wb-input wb-mono',
+            value: dir,
+            placeholder: 'D:\\WeComBot\\chats',
+            onChange: (e) => { setDir(e.target.value); setProbe(null) },
+          })),
+        h('div', { className: 'wb-row', style: { marginTop: 10 } },
+          h(Btn, { onClick: () => void check(), disabled: busy }, '检查目录'),
+          h(Btn, { kind: 'primary', onClick: () => void migrate(), disabled: busy || !probe?.ok }, '迁移到新目录'),
+          probe ? h('span', { className: cx('wb-small', probe.ok ? 'wb-dim' : 'wb-err') }, probe.message) : h('span', { className: 'wb-dim wb-small' }, '先检查一下再迁移')),
+        h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } },
+          '留空用默认 %USERPROFILE%\\WeComBot\\chats。迁移只改 DSH 会话放哪，不影响企微那边任何设置。'))
     }
 
     // ---------------- 人格 ----------------
