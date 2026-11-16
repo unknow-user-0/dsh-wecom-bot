@@ -1,0 +1,128 @@
+// 入站归一：企微回调帧 → 统一的 Chat / Message 结构
+//
+// 企微 aibot_msg_callback 的 body 只有这些字段（协议事实，文档 path/101463）：
+//   msgid / aibotid / chatid(仅群) / chattype: single|group / from.userid / msgtype / text.content
+//   image|file|video: { url, aeskey, filename? }
+//   voice: { content? }（语音转文字有时给）
+//
+// 三个必须知道的协议特点：
+//   1. 群聊只有 @机器人 才回调 → mentionedBot 恒 true，没有信息量，不要把判断挂它上面
+//   2. text.content 带 "@机器人名 " 前缀，但**我们不做字符串剥离** ——
+//      系统提示里告诉模型「你叫 X」，让它自己理解。原因：剥错比不剥更糟
+//   3. chattype=single 时**没有 chatid**，单聊的会话标识就是 from.userid
+
+import { mediaDecrypt, sniffImageMime, sniffFileExt, imageExt, fitImageToBudget, looksLikeImage } from '../wecom/media.js'
+
+/**
+ * @returns {{ chat, text, images, files, msgid, reqId, raw }}
+ *   chat = { kind:'dm'|'group', chatId, userId, displayName, groupName }
+ */
+export function normalizeInbound(frame) {
+  const body = frame.body || {}
+  const chattype = body.chattype === 'group' ? 'group' : 'single'
+  const kind = chattype === 'group' ? 'group' : 'dm'
+  const fromUser = body.from?.userid || ''
+  const chatId = kind === 'group' ? String(body.chatid || '') : fromUser
+
+  const chat = {
+    kind,
+    chatId,
+    userId: fromUser,
+    displayName: String(body.from?.name || body.from?.alias || '').trim(),
+    groupName: kind === 'group' ? String(body.chatname || body.group_name || '').trim() : '',
+  }
+
+  const msgtype = String(body.msgtype || '')
+  let text = ''
+  if (msgtype === 'text') text = String(body.text?.content ?? '')
+  else if (msgtype === 'image') text = '[图片]'
+  else if (msgtype === 'file') text = '[文件]'
+  else if (msgtype === 'video') text = '[视频]'
+  else if (msgtype === 'voice') text = String(body.voice?.content || '[语音]')
+  else if (msgtype === 'mixed') text = String(body.mixed?.text?.content || '[混合消息]')
+  else text = `[暂不支持的消息类型：${msgtype || 'unknown'}]`
+
+  return {
+    chat,
+    text,
+    images: [],
+    files: [],
+    msgid: String(body.msgid || ''),
+    reqId: frame.headers?.req_id || '',
+    msgtype,
+    raw: body,
+  }
+}
+
+/**
+ * 下载并解密图片。失败不丢事件 —— 保留占位文本，让用户知道是图没取到而不是被忽略。
+ * @param {object} raw 回调 body
+ * @param {object} message normalizeInbound 的结果（就地改 images / text）
+ */
+export async function attachInboundImage(raw, message, { log = () => {}, requireFn } = {}) {
+  const image = raw.image || {}
+  const url = typeof image.url === 'string' ? image.url : ''
+  const aeskey = typeof image.aeskey === 'string' ? image.aeskey : ''
+  const fail = (reason) => {
+    log('warn', `图片未取得（${reason}）`)
+    message.text = `[图片：${reason}，未能读取内容]`
+  }
+  if (url === '') { fail('回调缺 url'); return }
+  log('info', `图片回调 field=${Object.keys(image).join(',')} aeskey=${aeskey.length}字符`)
+  try {
+    const response = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(20_000) })
+    if (!response.ok) { fail(`下载失败 HTTP ${response.status}`); return }
+    const cipher = Buffer.from(await response.arrayBuffer())
+    const plain = mediaDecrypt(cipher, aeskey, looksLikeImage)
+    if (plain === undefined) { fail(`解密失败 ${cipher.length} 字节`); return }
+    const mimeType = sniffImageMime(plain) ?? 'image/png'
+    const msgid = message.msgid || 'image'
+    const fitted = await fitImageToBudget(plain, mimeType, requireFn)
+    message.images = [{ name: `${msgid}${imageExt(fitted.mimeType)}`, data: new Uint8Array(fitted.data), mimeType: fitted.mimeType }]
+    message.text = '[图片]'
+    log('info', `入站图片已就绪（${fitted.mimeType}，${fitted.data.length} 字节${fitted.data.length !== plain.length ? `，原图 ${plain.length} 字节已压缩` : ''}）`)
+  } catch (error) {
+    fail(`处理异常 ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 下载并解密文件 / 视频。与图片同一套加密口径，区别是内容不是图片，
+ * 不能用魔数校验，改用严格 PKCS#7 判定解密是否成功。
+ * 文件名回调不一定给 → 取 body.file.filename / 魔数嗅探 / url 末段兜底。
+ */
+export async function attachInboundFile(raw, message, { log = () => {} } = {}) {
+  const kind = raw.msgtype === 'video' ? 'video' : 'file'
+  const node = raw[kind] || {}
+  const url = typeof node.url === 'string' ? node.url : ''
+  const aeskey = typeof node.aeskey === 'string' ? node.aeskey : ''
+  const label = kind === 'video' ? '视频' : '文件'
+  const fail = (reason) => {
+    log('warn', `${label}未取得（${reason}）`)
+    message.text = `[${label}：${reason}，未能读取内容]`
+  }
+  if (url === '') { fail('回调缺 url'); return }
+  const rawName = typeof node.filename === 'string' && node.filename.trim() !== ''
+    ? node.filename.trim()
+    : (typeof node.file_name === 'string' && node.file_name.trim() !== '' ? node.file_name.trim() : '')
+  log('info', `${label}回调 field=${Object.keys(node).join(',')} aeskey=${aeskey.length}字符`)
+  try {
+    const response = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(60_000) })
+    if (!response.ok) { fail(`下载失败 HTTP ${response.status}`); return }
+    const cipher = Buffer.from(await response.arrayBuffer())
+    // 内容不是图片，没法用魔数；明文兜底只在没 aeskey 时允许（避免把密文当文件）
+    const plain = mediaDecrypt(cipher, aeskey, () => true, aeskey === '')
+    if (plain === undefined || plain.length === 0) { fail(`解密失败 ${cipher.length} 字节`); return }
+    const guessExt = (() => {
+      const m = /\.([A-Za-z0-9]{1,8})(?:$|\?|#)/.exec(url)
+      return m === null ? '' : `.${m[1]}`
+    })()
+    const sniffed = sniffFileExt(plain)
+    const name = rawName !== '' ? rawName : `${message.msgid || 'file'}${sniffed !== '' ? sniffed : guessExt}`
+    ;(message.files ??= []).push({ name, data: new Uint8Array(plain) })
+    message.text = `[${label}] ${name}`
+    log('info', `入站${label}已就绪（${name}，${plain.length} 字节）`)
+  } catch (error) {
+    fail(`处理异常 ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
