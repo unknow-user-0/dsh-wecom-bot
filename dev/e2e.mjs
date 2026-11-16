@@ -34,7 +34,6 @@ console.log('② 插件 apply 完成')
 // 填配置：假凭据 + 打开开关 + 白名单放行这个人
 const saved = await host.callRoute('/wecom-bot/api/save', {
   enabled: true,
-  dryRun: false,
   botId: 'bot-e2e',
   secret: 'secret-e2e',
   accessMode: 'whitelist',

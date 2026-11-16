@@ -131,6 +131,11 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 .wb-tag.err{background:rgba(207,34,46,.10);border-color:rgba(207,34,46,.24);color:var(--wb-err)}
 .wb-tag.brand{background:var(--wb-tint);border-color:var(--wb-tint-2);color:var(--wb-deep)}
 .wb-muted{color:var(--wb-sub)}.wb-dim{color:var(--wb-dim)}.wb-small{font-size:12px}.wb-err{color:var(--wb-err)}
+.wb-tipwrap{position:relative;display:inline-flex;align-items:center;vertical-align:middle}
+.wb-tipbtn{flex:none;display:inline-grid;place-items:center;width:15px;height:15px;margin-left:5px;padding:0;border-radius:50%;border:1px solid var(--wb-line-2);background:transparent;color:var(--wb-dim);cursor:pointer;line-height:1;transition:color .15s,border-color .15s}
+.wb-tipbtn:hover,.wb-tipwrap.open .wb-tipbtn{color:var(--wb-brand);border-color:var(--wb-brand)}
+.wb-tiptext{position:absolute;top:calc(100% + 7px);left:0;z-index:30;width:300px;max-width:min(300px,70vw);padding:9px 11px;border-radius:9px;background:var(--wb-card-bg,#fff);border:1px solid var(--wb-line);box-shadow:0 8px 24px rgba(0,0,0,.14);color:var(--wb-dim);font-size:12px;line-height:1.65;white-space:normal;text-align:left;font-weight:400}
+.wb-tipwrap.end .wb-tiptext{left:auto;right:0}
 .wb-mono{font-family:var(--dsh-font-family-mono,ui-monospace,monospace);font-size:12px}
 .wb-list{display:flex;flex-direction:column;gap:8px}
 .wb-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--wb-line);border-radius:11px;background:var(--wb-card)}
@@ -194,6 +199,26 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         children)
     }
     function Empty({ children }) { return h('div', { className: 'wb-empty' }, children) }
+
+    /**
+     * 圈起来的感叹号，点一下把说明展开。
+     * 不引弹层：面板里已经有 wb-hint / wb-tip 两套灰字了，
+     * 这个只用于「一句话说不完、但不值得占一块版面」的开关说明。
+     */
+    function Tip({ text, end }) {
+      const [open, setOpen] = useState(false)
+      if (!text) return null
+      return h('span', { className: cx('wb-tipwrap', open && 'open', end && 'end') },
+        h('button', {
+          type: 'button', className: 'wb-tipbtn', 'aria-label': '说明', 'aria-expanded': !!open,
+          title: open ? '收起' : '这是什么',
+          onClick: (e) => { e.stopPropagation(); setOpen(!open) },
+        }, h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', 'aria-hidden': true },
+          h('circle', { cx: 12, cy: 12, r: 9.2 }),
+          h('path', { d: 'M12 7.6v5.2' }),
+          h('path', { d: 'M12 16.4h.01' }))),
+        open ? h('span', { className: 'wb-tiptext' }, text) : null)
+    }
 
     function Icon({ size }) {
       const s = size || 20
@@ -316,8 +341,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h('div', { className: 'wb-hero-side' },
               h('div', { className: 'wb-switch-row' }, h('span', { className: 'lbl' }, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })),
               h('div', { className: 'wb-switch-row' },
-                h('span', { className: 'lbl' }, '试运行'),
-                h(Switch, { on: cfg.dryRun, onChange: (v) => quickToggle('dryRun', v), title: '开着时只写日志，不真的发到企业微信' })))),
+                h('span', { className: 'lbl' }, '长任务'),
+                h(Switch, { on: !!cfg.longTasks, onChange: (v) => quickToggle('longTasks', v) }),
+                h(Tip, { end: true, text: '打开后管理员私聊会多两套工具：后台任务（长活丢后台跑，你继续聊，跑完再取结果）和定时任务（让它到点自己干活，比如「每天早上九点把昨天的订单汇总发我」）。群里和普通成员永远拿不到。' })))),
           h('div', { className: 'wb-nav' },
             h('div', { className: 'wb-nav-in' },
               TABS.map((t) => h('button', {
@@ -403,7 +429,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Field, { label: '机器人名字' },
               h('input', { className: 'wb-input', value: cfg.botName || '', placeholder: '比如 海棠', onChange: (e) => setD('botName', e.target.value) })),
             h('div', { className: 'wb-field' },
-              h('label', null, '管理员私聊长任务档位'),
+              h('label', null,
+                '管理员私聊长任务档位',
+                h(Tip, { text: '开：管理员私聊多挂两套工具 —— 后台任务（长活丢后台，你先聊别的，跑完再取结果）和定时任务（让它到点自己干活）。关：一轮一答，长活会一直占着会话没法回你。群聊和普通成员不受影响，永远拿不到这两个。' })),
               h('div', { className: 'wb-switch-row' },
                 h(Switch, { on: !!cfg.longTasks, onChange: (v) => setD('longTasks', v) }),
                 h('span', { className: 'lbl' }, cfg.longTasks ? '开（有 jobs / schedule）' : '关（一轮一答）')))),

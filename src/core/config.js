@@ -14,7 +14,6 @@ export const ACCESS_MODES = ['whitelist', 'open']
 
 export const DEFAULTS = {
   enabled: false,          // 总开关：关着一句都不发
-  dryRun: true,            // 试运行：只记日志不真的回消息
   setupDone: false,        // 首次向导走完了没有（点了「跳过引导」也算）
   guideDone: false,        // 引导流程是否已完成
 
@@ -45,7 +44,7 @@ export const DEFAULTS = {
     groupMaxSec: 15,
     placeholder: 'emmm...', // 等待期占位文案（企微没有「正在输入」提示）
   },
-  longTasks: false,        // 管理员私聊额外挂 jobs + schedule
+  longTasks: true,         // 管理员私聊额外挂 jobs + schedule
 
   // ---- 能力开关（开源默认）----
   features: {

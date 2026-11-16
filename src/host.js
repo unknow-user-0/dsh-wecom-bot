@@ -7,7 +7,7 @@
 // 这个文件只管装配：配置、长连接、聊天中枢、人格变量、工具挂载、面板接口。
 // 具体能力都在 src/ 下面分好了：wecom/（协议）、chat/（会话）、memory/、persona/、core/。
 //
-// ⚠ 安全默认：总开关关、试运行开。不手动打开，一句都不会真的发到企微。
+// ⚠ 安全默认：总开关关。不手动打开，一句都不会真的发到企微。
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, dirname, basename, isAbsolute } from 'node:path'
@@ -252,10 +252,6 @@ export function apply(ctx) {
   /** 把模型这一轮的话发出去（走被动回复，必须带原回调 req_id） */
   async function replyTo(frame, text, silent = false) {
     const reqId = frame?.headers?.req_id
-    if (cfg.dryRun) {
-      log.info(`[试运行] 本该发出去：${silent ? '（沉默）' : text.slice(0, 200)}`)
-      return
-    }
     if (!reqId) { log.warn('没有 req_id，发不出去'); return }
     if (silent) return
     try {
@@ -290,7 +286,7 @@ export function apply(ctx) {
     log: logger.child('merge'),
     onPlaceholder: (frame, text) => {
       const reqId = frame?.headers?.req_id
-      if (!reqId || cfg.dryRun) return
+      if (!reqId) return
       void client?.respond(reqId, { msgtype: 'markdown', markdown: { content: text } }).catch(() => {})
     },
     onFlush: (frame, items) => handleBatch(frame, items),
@@ -640,7 +636,6 @@ export function apply(ctx) {
     ok: true,
     version: VERSION,
     enabled: cfg.enabled,
-    dryRun: cfg.dryRun,
     connected: Boolean(client && client.connected),
     kicked: Boolean(client && client.kicked),
     connState,
@@ -870,7 +865,7 @@ export function apply(ctx) {
   }
 
   flushLog()
-  log.info(`WeCom Bot ${VERSION} 已加载（${cfg.enabled ? '开关开' : '开关关'}，${cfg.dryRun ? '试运行' : '正式'}）`)
+  log.info(`WeCom Bot ${VERSION} 已加载（${cfg.enabled ? '开关开' : '开关关'}）`)
   return () => {
     for (const [, v] of mounted) for (const off of v.offs) { try { off() } catch {} }
     flushLog()

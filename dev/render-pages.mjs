@@ -18,7 +18,7 @@ const OUT = process.argv[2] || join(HERE, '..', '.snap')
 
 const now = Date.now()
 const STATE = {
-  ok: true, version: '0.1.0', enabled: true, dryRun: false, connected: true, kicked: false,
+  ok: true, version: '0.1.0', enabled: true, connected: true, kicked: false,
   connState: { connected: true, kicked: false, reason: '' },
   ready: true, setupDone: true, guideDone: true, accessMode: 'whitelist', admins: 1,
   vault: 'host', dataDir: 'C:\\Users\\Haha\\.dsh\\plugins-data\\wecom-bot',
@@ -34,7 +34,7 @@ const SERVICES = [
   { id: 'contact', name: '通讯录', desc: '搜索成员' },
 ]
 const CONFIG = {
-  enabled: true, dryRun: false, setupDone: true, guideDone: true,
+  enabled: true, longTasks: true, setupDone: true, guideDone: true,
   botName: '海棠', botId: 'aibXs8HvlkLQsTWGrYhTA_cw8RFC1m05nAi',
   accessMode: 'whitelist',
   admins: [{ userid: 'wofL_hCgAAJ5l8Bm66pquN28rQ76vQWg', name: '老大', role: 'owner', addedAt: now - 86400e3, quotaTokens: 0, mcp: { msg: true, mail: false, doc: true, todo: false, schedule: false, meeting: false, disk: true, contact: false } }],

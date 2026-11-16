@@ -1,7 +1,7 @@
 // 冒烟测试：用假宿主跑 apply()，喂一条假企微消息，看整条链路走到哪
 //
 // 跑法：node dev/smoke.mjs
-// 它不会碰真企微（没填 bot_id/secret，长连接起不来，dryRun 默认开）。
+// 它不会碰真企微（没填 bot_id/secret，长连接起不来）。
 
 import { createFakeHost } from './fake-host.js'
 
