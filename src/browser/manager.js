@@ -50,9 +50,14 @@ export function createBrowserManager({ dataDir, getConfig, log }) {
     return browser
   }
 
-  /** 打开（或接回）浏览器；顺带把存着的登录态灌进去。 */
-  async function ensure() {
-    if (!cfg().features?.browser) return { ok: false, message: '浏览器能力没开（面板里打开「网页操作」）' }
+  /**
+   * 打开（或接回）浏览器；顺带把存着的登录态灌进去。
+   *
+   * force：跳过「浏览器操作」开关。只有面板上的登录模块用（用户明确点了「去登录」），
+   * 因为登录页必须能打开浏览器，而开关管的是「模型能不能用浏览器工具」——两件事。
+   */
+  async function ensure({ force = false } = {}) {
+    if (!force && !cfg().features?.browser) return { ok: false, message: '浏览器能力没开（面板里打开「网页操作」）' }
     const b = instance()
     if (b.connected()) return { ok: true }
     const r = await b.open()

@@ -740,7 +740,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 功能 ----------------
-    function Features({ draft, setD }) {
+    function Features({ draft, setD, toast }) {
       const F = [
         ['browser', '浏览器操作', '登录态要自己导 cookie。只给主人档（群和陌生人拿不到）。'],
         ['video', '看视频', '依赖 dsh-video-storyboard，还要 ffmpeg。缺了会自动降级，不报错。'],
@@ -776,7 +776,217 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Switch, { on: !!draft.resync?.enabled, onChange: (v) => setD('resync.enabled', v) })),
           h('div', { className: 'wb-grid', style: { marginTop: 12 } },
             h(Field, { label: '最多往回补多久（分钟）', tip: '5 ~ 8640' },
-              h('input', { className: 'wb-input', type: 'number', min: '5', max: '8640', value: draft.resync?.maxMinutes ?? 120, onChange: (e) => setD('resync.maxMinutes', Number(e.target.value)) })))))
+              h('input', { className: 'wb-input', type: 'number', min: '5', max: '8640', value: draft.resync?.maxMinutes ?? 120, onChange: (e) => setD('resync.maxMinutes', Number(e.target.value)) })))),
+        h(VideoLogin, { toast }),
+        h(Asr, { toast }),
+      )
+    }
+
+    // ---------------- 视频站登录（抖音 / B站） ----------------
+    // 为什么要这个：抖音、B 站有登录态才给高清和不被风控。上游 yt-dlp 只认
+    // Netscape 格式的 cookies.txt，让用户自己从 F12 里拼这个文件不现实，
+    // 所以做成「点一下开浏览器 → 你自己登录 → 点一下存下来」。
+    function VideoLogin({ toast }) {
+      const [st, setSt] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [adv, setAdv] = useState('')        // 展开了哪个站点的高级选项
+      const [warned, setWarned] = useState('')  // 已看过风险说明的站点
+      const [agree, setAgree] = useState({})    // 勾了「确认是我本人的 cookie」
+      const [text, setText] = useState({})      // 粘贴的内容
+
+      const load = useCallback(async () => {
+        const r = await get('/video/login')
+        if (r?.ok !== false) setSt(r)
+      }, [])
+      useEffect(() => { void load() }, [load])
+
+      const doOpen = async (site) => {
+        setBusy(site + ':open')
+        const r = await post('/video/login/open', { site })
+        setBusy('')
+        toast(r?.ok ? '浏览器开好了，去那边登录，登完回来点「存下登录态」' : r?.message || '打不开浏览器', r?.ok ? 'ok' : 'err')
+      }
+      const doSave = async (site) => {
+        setBusy(site + ':save')
+        const r = await post('/video/login/save', { site })
+        setBusy('')
+        toast(r?.ok ? r.message || '已存' : r?.message || '没存上', r?.ok ? 'ok' : 'err')
+        void load()
+      }
+      const doClear = async (site) => {
+        setBusy(site + ':clear')
+        const r = await post('/video/login/clear', { site })
+        setBusy('')
+        toast(r?.ok ? '已清除' : r?.message || '清不掉', r?.ok ? 'ok' : 'err')
+        void load()
+      }
+      const doManual = async (site) => {
+        setBusy(site + ':manual')
+        // 三重确认的最后一关在后端也校验（confirmed 必须 true），前端只是把它问清楚
+        const r = await post('/video/login/manual', { site, text: text[site] || '', confirmed: agree[site] === true })
+        setBusy('')
+        toast(r?.ok ? r.message || '已存' : r?.message || '没存上', r?.ok ? 'ok' : 'err')
+        void load()
+      }
+
+      const sites = st?.sites || []
+
+      const manualBox = (s) => {
+        if (adv !== s.id) return null
+        if (warned !== s.id) {
+          return h('div', null,
+            h('div', { className: 'wb-small wb-dim', style: { marginBottom: 6 } }, '这条路人更少但更容易出错，先看一段说明：'),
+            h(Btn, { kind: 'ghost', sm: true, onClick: () => setWarned(s.id) }, '我了解风险，继续'))
+        }
+        return h('div', null,
+          h('div', { className: 'wb-small', style: { color: '#b45309', marginBottom: 6 } },
+            '这份 cookie 等同于你账号的登录凭据。谁拿到它，谁就能以你的身份操作该网站。'
+            + '只粘你自己浏览器导出的、也只留在这台机器上。'),
+          h('label', { className: 'wb-small', style: { display: 'block', marginBottom: 6 } },
+            h('input', {
+              type: 'checkbox', checked: agree[s.id] === true,
+              onChange: (e) => setAgree({ ...agree, [s.id]: e.target.checked }),
+            }), ' 我确认这份 cookie 来自我本人的浏览器'),
+          h('textarea', {
+            className: 'wb-input', rows: 5,
+            placeholder: '# Netscape HTTP Cookie File 开头的 7 列 tab 分隔文本',
+            value: text[s.id] || '', onChange: (e) => setText({ ...text, [s.id]: e.target.value }),
+          }),
+          h('div', { style: { marginTop: 6 } },
+            h(Btn, {
+              kind: 'ghost', sm: true, disabled: !!busy || agree[s.id] !== true,
+              onClick: () => void doManual(s.id),
+            }, busy === s.id + ':manual' ? '校验中…' : '校验并保存')))
+      }
+
+      const siteRow = (s) => h('div', {
+        key: s.id, style: { padding: '10px 0', borderTop: '1px solid var(--wb-line, #eee)' },
+      },
+        h('div', { className: 'wb-between' },
+          h('div', null,
+            h('div', null, s.name, s.loggedIn
+              ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#16a34a' } }, `已登录（${s.count} 条）`)
+              : h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '未登录')),
+            h('div', { className: 'wb-dim wb-small' }, s.hint || '')),
+          h('div', { style: { display: 'flex', gap: 6 } },
+            h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doOpen(s.id) },
+              busy === s.id + ':open' ? '打开中…' : (s.loggedIn ? '重新登录' : '去登录')),
+            s.loggedIn
+              ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doSave(s.id) },
+                busy === s.id + ':save' ? '保存中…' : '存下登录态')
+              : null,
+            s.loggedIn
+              ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doClear(s.id) }, '清除')
+              : null)),
+        h('div', { style: { marginTop: 6 } },
+          h('button', {
+            type: 'button', className: 'wb-link',
+            onClick: () => { setAdv(adv === s.id ? '' : s.id); setWarned('') },
+          }, adv === s.id ? '收起高级选项' : '高级选项：手动粘贴 cookies.txt'),
+          manualBox(s)))
+
+      return h(Card, {
+        title: '视频站登录',
+        hint: st?.jarInUse
+          ? '登录态已生效，看视频时会带上。'
+          : '不登录也能看，但抖音基本看不了、B 站只有低清。',
+      },
+        sites.length === 0 ? h(Empty, null, '读取中…') : sites.map(siteRow),
+        st?.jarFile
+          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } }, '登录态文件：' + st.jarFile)
+          : null)
+    }
+
+    // ---------------- 语音转文字 ----------------
+    // 上游的台词层要一个 OpenAI 兼容的 /audio/transcriptions 端点，没配就听不见声音，
+    // 而且它静默降级、不报错。这块就是把那条隐形依赖摆到台面上。
+    function Asr({ toast }) {
+      const [st, setSt] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [form, setForm] = useState({ baseUrl: '', model: '', language: '', key: '' })
+      const [hint, setHint] = useState(null)
+
+      const load = useCallback(async () => {
+        const r = await get('/asr')
+        if (r && r.state) {
+          setSt(r)
+          setForm((f) => ({ ...f, baseUrl: r.baseUrl || '', model: r.model || '', language: r.language || '' }))
+        }
+      }, [])
+      useEffect(() => { void load() }, [load])
+
+      const save = async () => {
+        setBusy('save')
+        const r = await post('/asr/save', form)
+        setBusy('')
+        toast(r?.ok ? '已保存' : r?.message || '没存上', r?.ok ? 'ok' : 'err')
+        setForm((f) => ({ ...f, key: '' }))
+        void load()
+      }
+      const start = async () => {
+        setBusy('start')
+        const r = await post('/asr/start', {})
+        setBusy('')
+        toast(r?.ok ? r.message || '起来了' : r?.message || '起不来', r?.ok ? 'ok' : 'err')
+        void load()
+      }
+      const useFound = async (d) => {
+        setBusy('found')
+        const r = await post('/asr/discover', { script: d.script, baseUrl: d.suggestBaseUrl })
+        setBusy('')
+        toast(r?.ok ? r.message || '配好了' : r?.message || '没配成', r?.ok ? 'ok' : 'err')
+        void load()
+      }
+      const showHint = async () => {
+        if (hint) { setHint(null); return }
+        const r = await get('/asr/hint')
+        setHint(r)
+      }
+
+      const state = st?.state
+      const color = state === 'ok' ? '#16a34a' : state === 'down' ? '#b45309' : '#b91c1c'
+      return h(Card, {
+        title: '语音转文字（ASR）',
+        hint: '看视频时听台词要用它。没配也能看，只是听不见声音。',
+      },
+        h('div', { className: 'wb-between', style: { marginBottom: 8 } },
+          h('div', null,
+            h('div', null, '当前状态：',
+              h('span', { style: { color } }, state === 'ok' ? '可用' : state === 'down' ? '连不上' : '没配置')),
+            h('div', { className: 'wb-dim wb-small' }, st?.message || '读取中…')),
+          h('div', { style: { display: 'flex', gap: 6 } },
+            st?.manageStart ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void start() },
+              busy === 'start' ? '启动中…' : '启动服务') : null,
+            h(Btn, { kind: 'ghost', sm: true, onClick: () => void showHint() }, hint ? '收起安装说明' : '没有服务？看怎么装'))),
+
+        // 本机已有的 ASR 部署：一键把它配进来
+        (st?.discovery || []).length
+          ? h('div', { style: { marginBottom: 8 } },
+            h('div', { className: 'wb-small wb-dim' }, '发现本机已有一套：'),
+            (st.discovery || []).map((d) => h('div', { key: d.script, className: 'wb-between', style: { marginTop: 4 } },
+              h('div', { className: 'wb-small' }, d.script),
+              h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void useFound(d) }, '用它'))))
+          : null,
+
+        h('div', { className: 'wb-grid', style: { marginTop: 4 } },
+          h(Field, { label: '服务地址', tip: '形如 http://127.0.0.1:8080 或 https://api.siliconflow.cn/v1' },
+            h('input', { className: 'wb-input', value: form.baseUrl, onChange: (e) => setForm({ ...form, baseUrl: e.target.value }) })),
+          h(Field, { label: '模型名', tip: '本机 whisper 填 whisper-1；云端按服务商文档填' },
+            h('input', { className: 'wb-input', value: form.model, onChange: (e) => setForm({ ...form, model: e.target.value }) })),
+          h(Field, { label: '语言', tip: 'zh = 中文' },
+            h('input', { className: 'wb-input', value: form.language, onChange: (e) => setForm({ ...form, language: e.target.value }) })),
+          h(Field, { label: 'API Key', tip: st?.keySet ? '已存了一个，不填就不动它' : '本机地址不用填' },
+            h('input', { className: 'wb-input', type: 'password', placeholder: st?.keySet ? '（已保存，不填就是不改）' : '', value: form.key, onChange: (e) => setForm({ ...form, key: e.target.value }) }))),
+        h('div', { style: { marginTop: 8 } },
+          h(Btn, { kind: 'primary', sm: true, disabled: !!busy, onClick: () => void save() }, busy === 'save' ? '保存中…' : '保存')),
+
+        hint ? h('div', { style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--wb-line, #eee)' } },
+          h('div', { className: 'wb-small', style: { fontWeight: 600, marginBottom: 6 } }, hint.title || '怎么装'),
+          (hint.options || []).map((o) => h('div', { key: o.id, style: { marginBottom: 8 } },
+            h('div', { className: 'wb-small', style: { fontWeight: 600 } }, o.name),
+            h('div', { className: 'wb-dim wb-small' }, o.detail)))) : null,
+
+        st?.file ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } }, '配置文件：' + st.file) : null)
     }
 
     // ---------------- 额度 ----------------

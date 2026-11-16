@@ -97,26 +97,51 @@ function compileValue(spec) {
 }
 
 /**
+ * output 与 parameters 用同一套 author spec 口径，所以要同样编译一遍。
+ * schema 之外的字段（render 等）原样保留。
+ */
+function compileOutputSpec(output) {
+  const { schema, ...rest } = output || {}
+  if (!schema || typeof schema !== 'object') return rest
+  const { properties, required, ...others } = schema
+  const compiled = compileValue(others)
+  if (properties && typeof properties === 'object') {
+    const c = compileAuthorSpec({ parameters: properties })
+    compiled.properties = c.properties
+    if (c.required.length) compiled.required = c.required
+  }
+  if (compiled.required === undefined && Array.isArray(required) && required.length) compiled.required = required
+  return { ...rest, schema: compiled }
+}
+
+/**
  * 造一套视频工具。
+ *
+ * 返回值从「数组」改成「带诊断的结构」——因为原来失败时全返回 `[]`，
+ * 面板和 /state 完全看不出是「没装」「加载失败」还是「schema 编译失败」，
+ * 真机上就出现过「日志说已接上、实际六个工具全挂不上」还查不出来的情况。
+ *
  * @param {{ctx:object, log:object}} o
- * @returns {Promise<object[]>} 拿不到就返回 []（插件缺这个可选依赖时不该崩）
+ * @returns {Promise<{ok:object[], failed:object[], reason:string, dir:string, ffmpeg:string}>}
  */
 export async function buildVideoTools({ ctx, log } = {}) {
+  const none = (reason) => ({ ok: [], failed: [], reason, dir: '', ffmpeg: '' })
   const found = findVideoPlugin()
   if (!found) {
     log?.warn?.('没找到 dsh-video-storyboard，看视频能力不可用（装它或忽略）')
-    return []
+    return none('没装 dsh-video-storyboard')
   }
+  const ffmpeg = findFfmpeg()
   let mod
   try {
     mod = await import(pathToFileURL(found.register).href)
   } catch (error) {
     log?.warn?.(`加载看视频能力失败：${error.message}`)
-    return []
+    return { ...none(`加载失败：${error.message}`), dir: found.dir, ffmpeg }
   }
   if (typeof mod.storyboardTools !== 'function') {
     log?.warn?.('dsh-video-storyboard 版本不对（没有 storyboardTools），看视频能力跳过')
-    return []
+    return { ...none('上游版本不对（没有 storyboardTools）'), dir: found.dir, ffmpeg }
   }
 
   // 冒充它的宿主 defineTool：只做「author spec → JSON Schema」，其余（render/timeout/并发）原样保留
@@ -126,7 +151,9 @@ export async function buildVideoTools({ ctx, log } = {}) {
       description: spec.description,
       parameters: compileAuthorSpec(spec),
     }
-    if (spec.output) tool.output = spec.output
+    // output 也要编译：上游 author spec 把 required 写在属性里（text: { required: true }），
+    // 宿主只认顶层 required 数组 —— 原样透传会被判 unsupported JSON schema，六个工具全都挂不上。
+    if (spec.output) tool.output = compileOutputSpec(spec.output)
     if (spec.timeoutMs) tool.timeoutMs = spec.timeoutMs
     if (typeof spec.isConcurrencySafe === 'function') tool.isConcurrencySafe = spec.isConcurrencySafe
     tool.execute = async (args, exec) => {
@@ -140,12 +167,13 @@ export async function buildVideoTools({ ctx, log } = {}) {
     return tool
   }
 
+  let tools = []
   try {
-    const tools = mod.storyboardTools(defineTool, ctx)
-    log?.info?.(`看视频能力已接上（${found.dir}）：${tools.map((t) => t.name).join(', ')}`)
-    return tools
+    tools = mod.storyboardTools(defineTool, ctx)
   } catch (error) {
     log?.warn?.(`注册看视频工具失败：${error.message}`)
-    return []
+    return { ...none(`注册失败：${error.message}`), dir: found.dir, ffmpeg }
   }
+  log?.info?.(`看视频能力已接上（${found.dir}）：${tools.map((t) => t.name).join(', ')}`)
+  return { ok: tools, failed: [], reason: '', dir: found.dir, ffmpeg }
 }

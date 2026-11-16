@@ -1,0 +1,312 @@
+// 视频站登录态：把「专用浏览器里登录过的 cookie」变成 yt-dlp 能用的 cookies.txt。
+//
+// 为什么要这个模块：抖音几乎全部要登录，B 站部分内容要登录，而 yt-dlp 只认
+// Netscape 格式的 cookies.txt。用户在面板里点一次「登录」，在弹出的专用浏览器里
+// 正常登录，再点「保存登录态」，这里就把 cookie 导出来落盘，并把路径写进
+// ~/.dsh/video.json 的 cookies 字段 —— 上游 dsh-video-storyboard 读的就是那里。
+//
+// 为什么要合并成一个文件：`video.json` 只有**一个** cookies 字段，装不下两套。
+// Netscape 格式本身按 domain 区分，把两个站的 cookie 合并进同一个 jar 是标准做法，
+// yt-dlp 会按目标站点的域名自己挑行，互不干扰。
+//
+// 安全边界（写死，不做成配置）：
+//   1. 自动抓取走插件自己的专用浏览器资料目录，绝不读用户自己浏览器的 cookie；
+//   2. 手动粘贴是**降级通道**，必须显式 confirmed=true 才接受（面板侧还有三重确认）；
+//   3. 导出的 jar 只落插件数据目录，不碰用户已有的 cookie 文件。
+
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+
+/** 支持登录的视频站。keys 里任意一个存在才算真的登录了。 */
+export const SITES = [
+  {
+    id: 'douyin',
+    name: '抖音',
+    url: 'https://www.douyin.com/',
+    domains: ['douyin.com'],
+    keys: ['sessionid', 'sessionid_ss'],
+    hint: '抖音匿名基本什么都看不了，必须登录。',
+  },
+  {
+    id: 'bili',
+    name: 'B站',
+    url: 'https://www.bilibili.com/',
+    domains: ['bilibili.com'],
+    keys: ['SESSDATA'],
+    hint: 'B 站匿名能看大部分，登录后能看更高清晰度和会员内容。',
+  },
+]
+
+const SITE_BY_ID = new Map(SITES.map((s) => [s.id, s]))
+
+function siteOf(id) {
+  const s = SITE_BY_ID.get(String(id || '').trim())
+  if (!s) throw new Error(`不认识的站点：${id}`)
+  return s
+}
+
+/** cookie 的 domain 是否属于这个站点（`.douyin.com` / `www.douyin.com` 都算） */
+function belongsTo(domain, suffixes) {
+  const d = String(domain || '').replace(/^\./, '').toLowerCase()
+  if (!d) return false
+  return suffixes.some((s) => d === s || d.endsWith('.' + s))
+}
+
+/* ------------------------------------------------------------ Netscape 格式 */
+
+/**
+ * 解析 Netscape cookies.txt。认 7 列 tab 分隔，也容忍空格分隔（有人手改过）。
+ * 注释行与空行直接丢。
+ * @returns {Array<{domain,includeSub,path,secure,expires,name,value}>}
+ */
+export function netscapeParse(text) {
+  const out = []
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '')
+    if (!line || line.startsWith('#')) continue
+    // 标准是 tab；手改的常是空格。两种都试，但值里可能有空格，所以优先 tab。
+    let parts = line.split('\t')
+    if (parts.length < 7) parts = line.split(/\s+/)
+    if (parts.length < 7) continue
+    const [domain, includeSub, path, secure, expires, name, ...rest] = parts
+    const value = rest.join('\t')
+    if (!domain || !name) continue
+    out.push({
+      domain,
+      includeSub: String(includeSub).toUpperCase() === 'TRUE',
+      path: path || '/',
+      secure: String(secure).toUpperCase() === 'TRUE',
+      expires: Number(expires) || 0,
+      name,
+      value,
+    })
+  }
+  return out
+}
+
+/** 一条 cookie → Netscape 行。expires <= 0 记 0（会话级，yt-dlp 也认）。 */
+export function netscapeLine(c) {
+  const domain = String(c.domain || '')
+  const includeSub = domain.startsWith('.') ? 'TRUE' : 'FALSE'
+  const expires = Number.isFinite(Number(c.expires)) && Number(c.expires) > 0 ? Math.floor(Number(c.expires)) : 0
+  return [
+    domain,
+    includeSub,
+    c.path || '/',
+    c.secure ? 'TRUE' : 'FALSE',
+    expires,
+    c.name,
+    String(c.value ?? ''),
+  ].join('\t')
+}
+
+export function netscapeString(cookies) {
+  const head = '# Netscape HTTP Cookie File\n# 由 dsh-wecom-bot 从专用浏览器导出，勿手改\n'
+  return head + cookies.map(netscapeLine).join('\n') + '\n'
+}
+
+/** CDP 导出的 cookie 对象 → Netscape 行需要的形状（字段名基本一致，只补默认值） */
+function fromCdp(c) {
+  return {
+    domain: c.domain,
+    path: c.path || '/',
+    secure: Boolean(c.secure),
+    expires: Number(c.expires) > 0 ? Number(c.expires) : 0,
+    name: c.name,
+    value: String(c.value ?? ''),
+  }
+}
+
+/* ---------------------------------------------------------------- 主逻辑 */
+
+/**
+ * @param {object} o
+ * @param {string}   o.dataDir    插件数据目录
+ * @param {Function} o.getBrowser () => browser manager（src/browser/manager.js）
+ * @param {object}   o.log
+ */
+export function createVideoLogin({ dataDir, getBrowser, log }) {
+  const dir = join(dataDir, 'video')
+  const jarFile = join(dir, 'cookies.txt')
+  mkdirSync(dir, { recursive: true })
+
+  const homeDir = () => process.env.DSH_HOME || join(homedir(), '.dsh')
+  const videoConfigFile = () => join(homeDir(), 'video.json')
+
+  function readVideoConfig() {
+    try {
+      const raw = JSON.parse(readFileSync(videoConfigFile(), 'utf8'))
+      return raw && typeof raw === 'object' ? raw : {}
+    } catch {
+      return {}
+    }
+  }
+
+  /** 只改我们关心的键，别的字段原样保留（用户可能自己配了 ytdlp 路径等） */
+  function writeVideoConfig(patch) {
+    const next = { ...readVideoConfig(), ...patch }
+    try {
+      mkdirSync(join(videoConfigFile(), '..'), { recursive: true })
+      writeFileSync(videoConfigFile(), JSON.stringify(next, null, 2), 'utf8')
+      return { ok: true, file: videoConfigFile() }
+    } catch (error) {
+      return { ok: false, message: `写不了 ${videoConfigFile()}：${error.message}` }
+    }
+  }
+
+  function readJar() {
+    try {
+      if (!existsSync(jarFile)) return []
+      return netscapeParse(readFileSync(jarFile, 'utf8'))
+    } catch {
+      return []
+    }
+  }
+
+  /**
+   * 把某个站点的 cookie 并进 jar：先删掉这个站点旧的所有行，再写新的。
+   * 这样重复保存不会越堆越多，也不会把另一个站的登录态冲掉。
+   */
+  function mergeJar(site, cookies) {
+    const fresh = cookies.filter((c) => belongsTo(c.domain, site.domains))
+    if (!fresh.length) return { ok: false, message: `没抓到 ${site.name} 的 cookie，可能还没登录成功` }
+    const kept = readJar().filter((c) => !belongsTo(c.domain, site.domains))
+    const all = [...kept, ...fresh]
+    try {
+      writeFileSync(jarFile, netscapeString(all), 'utf8')
+    } catch (error) {
+      return { ok: false, message: `写不了登录态文件：${error.message}` }
+    }
+    // 让上游认得这个 jar
+    const cfgPatch = writeVideoConfig({ cookies: jarFile })
+    if (!cfgPatch.ok) return cfgPatch
+    const names = new Set(fresh.map((c) => c.name))
+    const hit = site.keys.filter((k) => names.has(k))
+    return {
+      ok: true,
+      count: fresh.length,
+      total: all.length,
+      file: jarFile,
+      videoConfig: videoConfigFile(),
+      keys: hit,
+      message: hit.length
+        ? `${site.name} 登录态已保存（${fresh.length} 条 cookie）`
+        : `${site.name} 的 cookie 存下了，但没看到 ${site.keys.join(' / ')} —— 可能还没登录完，或者登录的是别的账号域`,
+    }
+  }
+
+  /** 当前状态：每个站点登录了没、jar 在哪、video.json 指向哪 */
+  function status() {
+    const jar = readJar()
+    const vc = readVideoConfig()
+    const sites = SITES.map((s) => {
+      const mine = jar.filter((c) => belongsTo(c.domain, s.domains))
+      const names = new Set(mine.map((c) => c.name))
+      const keys = s.keys.filter((k) => names.has(k))
+      return {
+        id: s.id,
+        name: s.name,
+        url: s.url,
+        hint: s.hint,
+        loggedIn: keys.length > 0,
+        count: mine.length,
+        keys,
+        // 会话级 cookie（expires=0）重启浏览器就没了，但 jar 里存着还能用，只是不会续期
+        sessionOnly: mine.filter((c) => !c.expires).length,
+      }
+    })
+    let jarTime = ''
+    try { jarTime = existsSync(jarFile) ? String(Number(readFileSync(jarFile).length)) : '' } catch {}
+    return {
+      jarFile,
+      jarExists: existsSync(jarFile),
+      jarBytes: jarTime ? Number(jarTime) : 0,
+      jarTotal: jar.length,
+      videoConfigFile: videoConfigFile(),
+      // 上游读的是 video.json 的 cookies 字段；跟我们的 jar 不一致时面板要提醒
+      videoConfigCookies: String(vc.cookies || ''),
+      jarInUse: String(vc.cookies || '') === jarFile,
+      sites,
+    }
+  }
+
+  /**
+   * 打开专用浏览器并跳到站点首页，把窗口挪到屏幕里让用户自己登录。
+   * force 跳过 features.browser 开关：登录态是给视频用的，跟网页操作开关不是一回事。
+   */
+  async function openLogin(siteId) {
+    const site = siteOf(siteId)
+    const bm = getBrowser()
+    if (!bm) return { ok: false, message: '浏览器模块没初始化' }
+    const r = await bm.ensure({ force: true })
+    if (!r.ok) return r
+    const b = bm.get()
+    await b.goto(site.url, 20000)
+    await b.show(true)
+    return {
+      ok: true,
+      site: site.id,
+      name: site.name,
+      message: `已打开${site.name}，请在那个窗口里登录。登录完成后回到这里点「保存登录态」。`,
+    }
+  }
+
+  /** 从专用浏览器导 cookie，过滤出这个站点的，存进 jar */
+  async function saveLogin(siteId) {
+    const site = siteOf(siteId)
+    const bm = getBrowser()
+    if (!bm) return { ok: false, message: '浏览器模块没初始化' }
+    if (!bm.get()?.connected?.()) {
+      return { ok: false, message: '浏览器没开着。先点「登录」打开它，登录完再保存' }
+    }
+    let cookies = []
+    try {
+      cookies = await bm.get().exportCookies()
+    } catch (error) {
+      return { ok: false, message: `导不出 cookie：${error.message}` }
+    }
+    const out = mergeJar(site, cookies.map(fromCdp))
+    try { await bm.get().show(false) } catch {}
+    log?.info?.(`${site.name} 登录态：${out.message}`)
+    return { ...out, status: status() }
+  }
+
+  /**
+   * 手动粘贴 cookies.txt 的降级通道。
+   * 必须 confirmed === true —— 这一条由面板的三重确认换来，后端再兜一次，
+   * 防止有人直接 curl 这个接口塞别人的 cookie。
+   */
+  function saveManual(siteId, text, confirmed) {
+    const site = siteOf(siteId)
+    if (confirmed !== true) {
+      return { ok: false, message: '手动粘贴需要先勾选确认（cookie 等同于账号凭据）' }
+    }
+    const parsed = netscapeParse(text)
+    if (!parsed.length) {
+      return { ok: false, message: '没解析出 cookie。需要 Netscape 格式（每行 7 列，tab 分隔），不是 JSON' }
+    }
+    const mine = parsed.filter((c) => belongsTo(c.domain, site.domains))
+    if (!mine.length) {
+      return { ok: false, message: `这份文件里没有 ${site.name} 的 cookie（域名要含 ${site.domains.join(' / ')}）` }
+    }
+    const out = mergeJar(site, mine)
+    log?.info?.(`${site.name} 手动导入登录态：${out.message}`)
+    return { ...out, status: status() }
+  }
+
+  /** 清掉某个站点（或全部）的登录态 */
+  function clear(siteId) {
+    const site = siteId ? siteOf(siteId) : null
+    const kept = site ? readJar().filter((c) => !belongsTo(c.domain, site.domains)) : []
+    try {
+      if (kept.length) writeFileSync(jarFile, netscapeString(kept), 'utf8')
+      else if (existsSync(jarFile)) writeFileSync(jarFile, netscapeString([]), 'utf8')
+    } catch (error) {
+      return { ok: false, message: error.message }
+    }
+    return { ok: true, message: site ? `${site.name} 的登录态已清掉` : '全部登录态已清掉', status: status() }
+  }
+
+  return { status, openLogin, saveLogin, saveManual, clear, jarFile, videoConfigFile }
+}

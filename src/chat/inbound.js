@@ -11,7 +11,7 @@
 //      系统提示里告诉模型「你叫 X」，让它自己理解。原因：剥错比不剥更糟
 //   3. chattype=single 时**没有 chatid**，单聊的会话标识就是 from.userid
 
-import { mediaDecrypt, sniffImageMime, sniffFileExt, imageExt, fitImageToBudget, looksLikeImage } from '../wecom/media.js'
+import { mediaDecrypt, sniffImageMime, sniffFileExt, imageExt, fitImageToBudget, looksLikeImage, looksLikeVideo } from '../wecom/media.js'
 
 /**
  * @returns {{ chat, text, images, files, msgid, reqId, raw }}
@@ -119,9 +119,12 @@ export async function attachInboundFile(raw, message, { log = () => {} } = {}) {
     })()
     const sniffed = sniffFileExt(plain)
     const name = rawName !== '' ? rawName : `${message.msgid || 'file'}${sniffed !== '' ? sniffed : guessExt}`
-    ;(message.files ??= []).push({ name, data: new Uint8Array(plain) })
-    message.text = `[${label}] ${name}`
-    log('info', `入站${label}已就绪（${name}，${plain.length} 字节）`)
+    // msgtype 说 video、但魔数说不是视频时以魔数为准：否则模型会拿一个图片路径去调
+    // video_storyboard，白跑一趟；反过来企微把 mp4 塞进 file 字段时也能认出来。
+    const isVideo = looksLikeVideo(plain)
+    ;(message.files ??= []).push({ name, data: new Uint8Array(plain), kind: isVideo ? 'video' : 'file' })
+    message.text = isVideo ? `[视频] ${name}` : `[${label}] ${name}`
+    log('info', `入站${label}已就绪（${name}，${plain.length} 字节${isVideo ? '，识别为视频' : ''}）`)
   } catch (error) {
     fail(`处理异常 ${error instanceof Error ? error.message : String(error)}`)
   }

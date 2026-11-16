@@ -32,6 +32,8 @@ import { buildTools } from './tools/wecom.js'
 import { buildBrowserTools } from './tools/browser.js'
 import { buildVideoTools } from './tools/video.js'
 import { createBrowserManager } from './browser/manager.js'
+import { createVideoLogin } from './video/login.js'
+import { createAsr } from './video/asr.js'
 
 export const name = 'wecom-bot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt']
@@ -78,6 +80,29 @@ export function apply(ctx) {
     log: logger.child('browser'),
   })
   ctx.effect(() => () => { try { browser.shutdown() } catch {} }, 'wecom-bot: 关浏览器')
+
+  // ---------- 视频站登录（抖音 / B站） ----------
+  // 上游 yt-dlp 只认 Netscape 格式的 cookies.txt。这里把「用专用浏览器登录一次，
+  // 然后把 cookie 导出来喂给 yt-dlp」做成面板上的按钮，省得用户去翻 F12。
+  const videoLogin = createVideoLogin({
+    dataDir: DATA_DIR,
+    getBrowser: () => browser,
+    log: logger.child('video-login'),
+  })
+
+  // ---------- 语音转文字 ----------
+  // 上游的台词层靠一个 OpenAI 兼容端点，没配就「看得见图、听不见声音」，且静默降级。
+  // 这里把那条隐形依赖做成面板上看得见、点得动的东西。
+  const asr = createAsr({
+    log: logger.child('asr'),
+    // 宿主自带语音服务时根本不用装 whisper；ctx.get 是 cordis 的安全取法
+    getHostService: () => { try { return ctx.get?.('speechToText') } catch { return undefined } },
+    // 插件的 cwd 不是用户工作区，把真正的工作区路径递进去，才能找到旁边的 asr/ 目录
+    getExtraDirs: () => {
+      const dir = String(cfg.workspaceDir || '').trim()
+      return dir ? [dir] : []
+    },
+  })
 
   // ---------- 心情与主动搭话 ----------
 
@@ -328,7 +353,9 @@ export function apply(ctx) {
     const sid = info.sessionId
     sessionChat.set(sid, chat)
     // 工具按档位挂：social 档位没有文件/微盘这类能碰本机的东西
-    try { mountTools(info.agent, chat, info.level, sid) } catch (error) { log.debug(`挂工具失败：${error.message}`) }
+    // 必须 await —— 挂工具现在是 async（要等视频工具那批 Promise），
+    // 不等的话 prompt 先跑起来，模型看到的是没有 video_* 的工具清单。
+    try { await mountTools(info.agent, chat, info.level, sid) } catch (error) { log.debug(`挂工具失败：${error.message}`) }
 
     // 群上下文：被 @ 时先用 MCP 补一段最近消息（只在打开的群、且距上次同步够久时）
     if (chat.kind === 'group' && cfg.history.enabled && cfg.history.syncOnFirstMention) {
@@ -538,43 +565,57 @@ export function apply(ctx) {
   const browserTools = buildBrowserTools({ getBrowser: () => browser, getConfig, log })
 
   // 看视频：所有档位都能看（只是读文件/抽帧，不碰本机别的东西）。
-  // 它是异步接的（上游包可能没装），接上前先空着。
-  let videoTools = []
-  buildVideoTools({ ctx, log })
-    .then((list) => { videoTools = list })
-    .catch((error) => log.warn(`看视频能力没接上：${error.message}`))
+  //
+  // 存的是 **Promise 不是数组** —— 原来是 `let videoTools = []` + then 里赋值，
+  // 启动后头几秒进来的消息拿到的工具清单里没有视频工具；等数组被填上，
+  // 已经在跑的会话也不会重挂（mountTools 的 key 只在下次消息时才算）。
+  // 改成 Promise 后 toolsFor 是 async，等它一次就永远拿到完整清单。
+  const videoReady = buildVideoTools({ ctx, log })
+    .catch((error) => {
+      log.warn(`看视频能力没接上：${error.message}`)
+      return { ok: [], failed: [], reason: `异常：${error.message}`, dir: '', ffmpeg: '' }
+    })
+  let videoReport = null // 给面板/自检用：挂上了什么、为什么没挂上
+  void videoReady.then((r) => { videoReport = r })
 
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
-  function toolsFor(level) {
+  async function toolsFor(level) {
+    const video = await videoReady
     // 文件/微盘/画图 归「收发文件」这一个总闸管（默认开，老大定的）
     const fileish = (t) => /file|disk|draw/.test(t.name)
     if (level === 'owner') {
       const list = [...wecomTools].filter((t) => cfg.features.files || !fileish(t))
       if (cfg.features.browser) list.push(...browserTools)
-      if (cfg.features.video) list.push(...videoTools)
+      if (cfg.features.video) list.push(...video.ok)
       return list
     }
     // social（群聊 / 非管理员私聊）：只能发消息、读本会话历史、记点东西、看视频、查企微原生能力。
     // 没有文件、没有微盘、没有浏览器、没有画图。
     const list = wecomTools.filter((t) => !/file|disk|draw/.test(t.name))
-    if (cfg.features.video) list.push(...videoTools)
+    if (cfg.features.video) list.push(...video.ok)
     return list
   }
-  function mountTools(agent, chat, level, sid) {
-    const list = toolsFor(level)
+  async function mountTools(agent, chat, level, sid) {
+    const list = await toolsFor(level)
     const key = list.map((t) => t.name).sort().join(',') + '|' + level
     const prev = mounted.get(sid)
     if (prev && prev.agent === agent && prev.key === key) return
     if (prev) for (const off of prev.offs) { try { off() } catch {} }
     const offs = []
+    const failed = []
     for (const tool of list) {
       try {
         const off = agent.ctx.tools.register(tool)
         if (typeof off === 'function') offs.push(off)
       } catch (error) {
+        failed.push({ name: tool.name, message: error.message })
         log.warn(`工具 ${tool.name} 挂不上：${error.message}`)
       }
+    }
+    if (failed.length) {
+      // 挂不上的工具留在自检里，面板上能看到「说接上了、实际没挂上」
+      videoReport = { ...(videoReport || {}), mountFailed: failed }
     }
     mounted.set(sid, { agent, key, offs })
   }
@@ -618,7 +659,7 @@ export function apply(ctx) {
     return cfg
   }
 
-  route('/state', () => ({
+  route('/state', async () => ({
     ok: true,
     version: VERSION,
     enabled: cfg.enabled,
@@ -632,9 +673,98 @@ export function apply(ctx) {
     admins: cfg.admins.length,
     vault: secrets.kind,
     dataDir: DATA_DIR,
+    // 自检：这三项以前只能靠翻 plugin.log 猜，面板上必须能直接看到
+    video: videoSelfCheck(),
+    asr: await asrSelfCheck(),
+    browser: browserSelfCheck(),
   }))
 
+  /** 看视频链路自检：模块找没找到 / 工具实际挂上几个 / ffmpeg 在不在 / 附件服务可用否 */
+  function videoSelfCheck() {
+    const r = videoReport
+    if (!r) return { state: 'loading', message: '还在接', tools: [], ffmpeg: '', dir: '' }
+    const ok = Array.isArray(r.ok) ? r.ok : []
+    const failed = Array.isArray(r.failed) ? r.failed : []
+    const mountFailed = Array.isArray(r.mountFailed) ? r.mountFailed : []
+    return {
+      state: ok.length > 0 ? 'ok' : 'broken',
+      message: r.reason || '',
+      tools: ok.map((t) => t.name),
+      failed,
+      mountFailed,
+      ffmpeg: r.ffmpeg || '',
+      dir: r.dir || '',
+      // 上游工具要 ctx.attachments.saveImage 才能把分镜图提交成附件，缺了只能出纯文本
+      canSaveImage: typeof ctx.attachments?.saveImage === 'function',
+    }
+  }
+
+  /** ASR 自检：交给 asr 模块（它读 $DSH_HOME/asr.json 并探活），这里只保留 /state 的字段形状 */
+  async function asrSelfCheck() {
+    try {
+      return await asr.status()
+    } catch (error) {
+      return { state: 'missing', baseUrl: '', hostService: false, message: error.message }
+    }
+  }
+
+  /** 浏览器自检：能不能找到 Edge/Chrome、开没开、cookie 存了几条 */
+  function browserSelfCheck() {
+    try {
+      const s = browser.status?.() || {}
+      return {
+        state: s.browserPath ? (s.connected ? 'ok' : 'idle') : 'broken',
+        browserPath: s.browserPath || '',
+        enabled: s.enabled,
+        connected: Boolean(s.connected),
+        running: Boolean(s.running),
+        lastError: s.lastError || '',
+        cookies: s.cookies || { saved: false, count: 0 },
+        message: s.browserPath ? '' : '本机没找到 Edge / Chrome',
+      }
+    } catch (error) {
+      return { state: 'broken', message: error.message }
+    }
+  }
+
   route('/config', () => ({ ok: true, config: publicConfig(cfg), services: MCP_SERVICES }))
+
+  // ---------- 视频站登录（抖音 / B站） ----------
+  // 浏览器工具和登录模块共用同一个专用浏览器实例，所以这里绝不另起一个。
+  route('/video/login', () => videoLogin.status())
+  route('/video/login/open', async (req) => {
+    const body = await readBody(req)
+    return videoLogin.openLogin(body.site)
+  })
+  route('/video/login/save', async (req) => {
+    const body = await readBody(req)
+    return videoLogin.saveLogin(body.site)
+  })
+  // 手动粘贴 cookies.txt 是兜底路线，后端同样要求显式确认（面板的三重确认不能只在前端）
+  route('/video/login/manual', async (req) => {
+    const body = await readBody(req)
+    return videoLogin.saveManual(body.site, body.text, body.confirmed === true)
+  })
+  route('/video/login/clear', async (req) => {
+    const body = await readBody(req)
+    return videoLogin.clear(body.site)
+  })
+
+  // ---------- 语音转文字 ----------
+  route('/asr', () => asr.status())
+  route('/asr/save', async (req) => {
+    const body = await readBody(req)
+    return asr.save(body)
+  })
+  route('/asr/start', async (req) => {
+    const body = await readBody(req)
+    return asr.start({ waitMs: Number(body.waitMs) || 90000 })
+  })
+  route('/asr/discover', async (req) => {
+    const body = await readBody(req)
+    return asr.useDiscovered(body.script, body.baseUrl)
+  })
+  route('/asr/hint', () => asr.installHint())
   route('/save', async (req) => {
     const body = await readBody(req)
     // 面板传 { config: {...} }；也接受直接摊平传（脚本/curl 方便）

@@ -86,6 +86,44 @@ export function looksLikeImage(buf) {
   return sniffImageMime(buf) !== undefined
 }
 
+// ISO BMFF（ftyp）容器里图片和视频共用同一个盒子头，只能看 brand 区分。
+// 曾经这里只判 b[4..8]==='ftyp' 就返回 image/heic —— 而**所有 mp4/mov 都是 ftyp**，
+// 结果私聊发的视频被当成 heic 图片落盘，模型拿到的是一张读不出来的「图」。
+const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'])
+const AVIF_BRANDS = new Set(['avif', 'avis'])
+const MOV_BRANDS = new Set(['qt  '])
+
+/**
+ * 取 ftyp 盒里的 brand 列表（major brand + compatible brands）。
+ * 不是 ftyp 容器返回 null。
+ */
+export function ftypBrands(buffer) {
+  const b = Buffer.from(buffer.buffer ?? buffer, buffer.byteOffset ?? 0, buffer.byteLength ?? buffer.length)
+  if (b.length < 12) return null
+  if (b.subarray(4, 8).toString('latin1') !== 'ftyp') return null
+  const size = b.readUInt32BE(0)
+  // box size 不可信时按 64 字节封顶，够放 12 个 brand
+  const end = size >= 16 && size <= b.length ? size : Math.min(b.length, 64)
+  const brands = []
+  const major = b.subarray(8, 12).toString('latin1')
+  if (/^[\x20-\x7e]{4}$/.test(major)) brands.push(major)
+  // 12..16 是 minor version（二进制数字），兼容 brand 从 16 开始
+  for (let i = 16; i + 4 <= end; i += 4) {
+    const tag = b.subarray(i, i + 4).toString('latin1')
+    if (!/^[\x20-\x7e]{4}$/.test(tag)) break
+    brands.push(tag)
+  }
+  return brands.length > 0 ? brands : null
+}
+
+/** ftyp 容器是视频还是图片：返回 'image' | 'video'，不是 ftyp 返回 null */
+export function ftypKind(buffer) {
+  const brands = ftypBrands(buffer)
+  if (brands === null) return null
+  if (brands.some((t) => AVIF_BRANDS.has(t) || HEIF_BRANDS.has(t))) return 'image'
+  return 'video'
+}
+
 export function sniffImageMime(buffer) {
   const b = Buffer.from(buffer.buffer ?? buffer, buffer.byteOffset ?? 0, buffer.byteLength ?? buffer.length)
   if (b.length < 12) return undefined
@@ -94,7 +132,12 @@ export function sniffImageMime(buffer) {
   if (b.subarray(0, 4).toString('latin1') === 'GIF8') return 'image/gif'
   if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp'
   if (b.subarray(0, 2).toString('latin1') === 'BM') return 'image/bmp'
-  if (b.subarray(4, 8).toString('latin1') === 'ftyp') return 'image/heic'
+  if (b.subarray(4, 8).toString('latin1') === 'ftyp') {
+    const brands = ftypBrands(b) || []
+    if (brands.some((t) => AVIF_BRANDS.has(t))) return 'image/avif'
+    if (brands.some((t) => HEIF_BRANDS.has(t))) return 'image/heic'
+    return undefined // mp4 / mov / m4v 等视频容器：不是图片
+  }
   return undefined
 }
 
@@ -107,6 +150,17 @@ export function sniffFileExt(buffer) {
   if (b.length < 8) return ''
   const image = sniffImageMime(b)
   if (image !== undefined) return imageExt(image)
+  // 视频容器：以前没有分支，mp4 被 sniffImageMime 误判成 heic 时侥幸有扩展名，
+  // 修正嗅探后必须补上，否则文件名只剩 msgid 哈希。
+  const kind = ftypKind(b)
+  if (kind === 'video') {
+    const brands = ftypBrands(b) || []
+    if (brands.some((t) => MOV_BRANDS.has(t))) return '.mov'
+    if (brands.some((t) => t === 'M4V ' || t === 'M4VH' || t === 'M4VP')) return '.m4v'
+    return '.mp4'
+  }
+  if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'AVI ') return '.avi'
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return '.mkv'
   const head = b.subarray(0, 4).toString('latin1')
   if (head === 'PK\u0003\u0004' || head === 'PK\u0005\u0006') return '.zip'
   if (b.subarray(0, 5).toString('latin1') === '%PDF-') return '.pdf'
@@ -124,7 +178,17 @@ export function imageExt(mimeType) {
   if (mimeType === 'image/webp') return '.webp'
   if (mimeType === 'image/bmp') return '.bmp'
   if (mimeType === 'image/heic') return '.heic'
+  if (mimeType === 'image/avif') return '.avif'
   return '.png'
+}
+
+/** 明文是不是视频容器（mp4/mov/m4v/avi/mkv）—— 入站附件据此决定当视频还是当文件 */
+export function looksLikeVideo(buffer) {
+  const b = Buffer.from(buffer.buffer ?? buffer, buffer.byteOffset ?? 0, buffer.byteLength ?? buffer.length)
+  if (b.length < 12) return false
+  if (ftypKind(b) === 'video') return true
+  if (b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'AVI ') return true
+  return b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3
 }
 
 /** 引擎单图预算 2 MiB，手机直出照片动辄十几 MB，不压就会被整张丢掉 */
