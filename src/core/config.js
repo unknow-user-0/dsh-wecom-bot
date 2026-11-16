@@ -93,8 +93,11 @@ function deepClone(o) {
   return JSON.parse(JSON.stringify(o))
 }
 
-/** 把任意对象合并到默认值上（只认默认值里有的键） */
-function merge(base, patch) {
+/**
+ * 把 patch 深合并进 base（只认 base 里有的键，`v !== undefined` 才覆盖）。
+ * 也是 /save 的增量更新语义：只传改动的字段，没传的不动。
+ */
+export function merge(base, patch) {
   const out = deepClone(base)
   if (!patch || typeof patch !== 'object') return out
   for (const [k, v] of Object.entries(patch)) {

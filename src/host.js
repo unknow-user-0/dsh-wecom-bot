@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
 
-import { loadConfig, saveConfig, publicConfig, DATA_DIR } from './core/config.js'
+import { loadConfig, saveConfig, publicConfig, merge, DATA_DIR } from './core/config.js'
 import { createLogger, recentLogs, redact } from './core/logger.js'
 import { record as recordActivity, recentEntries, chatStats, flushLog } from './core/activity.js'
 import { createVault, mcpRef } from './core/vault.js'
@@ -653,11 +653,14 @@ export function apply(ctx) {
     const body = await readBody(req)
     // 面板传 { config: {...} }；也接受直接摊平传（脚本/curl 方便）
     const patch = body.config && typeof body.config === 'object' ? body.config : body
-    const next = { ...cfg, ...patch }
+    // 增量语义：patch 里有什么就改什么，没传的字段一律保持服务端当前值。
+    // 前端只发改动过的字段（见 client/client.js 的 diffConfig），所以「面板快照
+    // 过期」不会再覆盖掉别处刚做的修改 —— 这是 lost update 的根治办法。
+    // 深合并由 merge() 保证：嵌套对象逐层合并，不会被半截对象替换掉。
+    const next = merge(cfg, patch)
     delete next.secret
-    // 这两样不走 /save：面板 draft 是加载时的快照，用户在别处改完再回来保存，
-    // 旧快照会把新值冲掉。管理员池（mcp 下发的是布尔，存回来会变成 "true"）走
-    // /admin/*；工作区目录走 /workspace/migrate。都保留服务端当前值。
+    // 兜底：这两样永远不走 /save。管理员池的 mcp 在 publicConfig 里是布尔，
+    // 原样存回来会变成 "true"，只能走 /admin/*；工作区目录走 /workspace/migrate。
     next.admins = cfg.admins
     next.workspaceDir = cfg.workspaceDir
     // 密钥单独收，不进 config

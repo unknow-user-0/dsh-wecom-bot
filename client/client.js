@@ -27,6 +27,51 @@ window.__ModuleLoader__.load({
         .then((r) => r.json())
         .catch((e) => ({ ok: false, message: '连不上插件：' + e.message }))
     const clone = (o) => JSON.parse(JSON.stringify(o))
+    // 只挑出和 base 不一样的字段（深比较）。
+    // /save 是增量语义：传什么改什么，没传的服务端一律不动。所以这里绝不能把
+    // 整份 draft 发过去 —— draft 是「打开面板那一刻」的快照，整份发出去会把
+    // 这之后别处（向导、目录迁移、另一个标签页、脚本）刚做的修改整体冲掉。
+    //
+    // 注意：diffConfig 只适合「刚 reload 完、draft 和 cfg 同一时刻」的场景。
+    // 面板长时间开着时要用 pickPaths()，按「用户碰过的字段」取，否则会把
+    // 别处改成新值的字段误判成「用户改过」而发回旧值。
+    const diffConfig = (base, next) => {
+      const out = {}
+      for (const [k, v] of Object.entries(next || {})) {
+        if (v === undefined) continue
+        const b = base ? base[k] : undefined
+        if (JSON.stringify(v) === JSON.stringify(b)) continue
+        if (v && typeof v === 'object' && !Array.isArray(v) && b && typeof b === 'object' && !Array.isArray(b)) {
+          const d = diffConfig(b, v)
+          if (Object.keys(d).length) out[k] = d
+          continue
+        }
+        out[k] = v
+      }
+      return out
+    }
+    // 把「用户动过的字段」（path → value）拼成一个只含这些字段的 patch。
+    // 这是面板保存真正该用的东西：只有用户动过的字段才算他的意图，没碰的
+    // 一律不发 —— 别处改的新值就保住了。用 draft 和 cfg 做 diff 是不行的：
+    // 面板开着的时候别处把 accessMode 改成 open，draft 里还是旧值 whitelist，
+    // diff 会误判成「用户改过」，又把旧值发回去覆盖 —— lost update 原地复发。
+    const buildPatch = (edits) => {
+      const out = {}
+      for (const [p, v] of Object.entries(edits || {})) {
+        if (v === undefined) continue
+        const top = p.split('.')[0]
+        const rest = p.split('.').slice(1).join('.')
+        if (!rest) out[top] = v
+        else out[top] = setPath(out[top] || {}, rest, v)
+      }
+      return out
+    }
+    // 把「用户还没保存的改动」盖到一份新配置上，得到面板该显示的 draft。
+    const applyEdits = (base, edits) => {
+      let out = base
+      for (const [p, v] of Object.entries(edits || {})) out = setPath(out, p, v)
+      return out
+    }
     const getPath = (o, p) => p.split('.').reduce((x, k) => (x == null ? undefined : x[k]), o)
     const setPath = (obj, path, value) => {
       const next = clone(obj)
@@ -247,13 +292,22 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         toastTimer.current = setTimeout(() => setToastMsg(null), 2600)
       }, [])
 
+      const [edits, setEdits] = useState({})
+      // 镜像一份给 reload 用：reload 的 useCallback 依赖是空的，直接读 edits
+      // 会拿到闭包里的旧值。
+      const editsRef = useRef({})
+      editsRef.current = edits
+      const editCount = useMemo(() => Object.keys(edits).length, [edits])
+
       const reload = useCallback(async () => {
         const [s, c] = await Promise.all([get('/state'), get('/config')])
         if (s?.ok) setSt(s)
         if (c?.ok) {
           setCfg(c.config)
           setServices(c.services || [])
-          setDraft((d) => (d === null ? clone(c.config) : d))
+          // 已有 draft 时把用户还没保存的改动重新盖上去：别处刚改的字段要能
+          // 显示出来，用户自己动过的字段也不能被刷掉。
+          setDraft((d) => (d === null ? clone(c.config) : applyEdits(clone(c.config), editsRef.current)))
         }
       }, [])
 
@@ -263,26 +317,44 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         return () => clearInterval(t)
       }, [])
 
-      const dirty = useMemo(() => {
-        if (!draft || !cfg) return false
-        return JSON.stringify(draft) !== JSON.stringify(cfg)
-      }, [draft, cfg])
+      const dirty = editCount > 0
 
-      const setD = useCallback((path, value) => setDraft((d) => (d ? setPath(d, path, value) : d)), [])
+      const setD = useCallback((path, value) => {
+        setEdits((e) => {
+          // 用户把值改回服务端当前的，就不算改动 —— 否则保存栏一直亮着，
+          // 还会白跑一次 /save。
+          const same = cfg && JSON.stringify(value) === JSON.stringify(getPath(cfg, path))
+          if (same) { const n = { ...e }; delete n[path]; return n }
+          return { ...e, [path]: value }
+        })
+        setDraft((d) => (d ? setPath(d, path, value) : d))
+      }, [cfg])
+
+      const undo = useCallback(() => {
+        setEdits({})
+        setDraft(cfg ? clone(cfg) : null)
+      }, [cfg])
 
       const save = useCallback(async () => {
-        if (!draft) return
-        const r = await post('/save', { config: draft })
-        if (r?.ok) { setCfg(r.config); setDraft(clone(r.config)); toast('已保存', 'ok'); void reload() }
+        if (!draft || !cfg) return
+        // 只发用户动过的字段。整份发会把「面板打开之后别处改的东西」冲掉。
+        const patch = buildPatch(edits)
+        if (!Object.keys(patch).length) { undo(); return }
+        const r = await post('/save', { config: patch })
+        if (r?.ok) { setCfg(r.config); setDraft(clone(r.config)); setEdits({}); toast('已保存', 'ok'); void reload() }
         else toast(r?.message || '保存失败', 'err')
-      }, [draft, reload, toast])
+      }, [cfg, draft, edits, reload, toast, undo])
 
       const quickToggle = useCallback(async (path, value) => {
         if (!cfg) return
-        const next = setPath(cfg, path, value)
-        const r = await post('/save', { config: next })
-        if (r?.ok) { setCfg(r.config); setDraft((d) => (d && !dirty ? clone(r.config) : d)); void reload() }
-        else toast(r?.message || '保存失败', 'err')
+        // 同样只发这一个字段，不夹带整份快照。setPath 到空对象上就能长出嵌套结构。
+        const r = await post('/save', { config: setPath({}, path, value) })
+        if (r?.ok) {
+          setCfg(r.config)
+          setEdits((e) => { const n = { ...e }; delete n[path]; return n })
+          setDraft((d) => (d && !dirty ? clone(r.config) : d))
+          void reload()
+        } else toast(r?.message || '保存失败', 'err')
       }, [cfg, dirty, reload, toast])
 
       useEffect(() => {
@@ -349,7 +421,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           dirty ? h('div', { className: 'wb-savebar' },
             h('span', { className: 'msg' }, '有改动还没保存'),
             h('span', { className: 'wb-muted wb-small' }, h('span', { className: 'wb-kbd' }, 'Ctrl'), ' + ', h('span', { className: 'wb-kbd' }, 'S')),
-            h(Btn, { kind: 'ghost', onClick: () => setDraft(clone(cfg)) }, '撤销'),
+            h(Btn, { kind: 'ghost', onClick: undo }, '撤销'),
             h(Btn, { kind: 'primary', onClick: () => void save() }, '保存设置')) : null,
           wizard ? h(Wizard, { ...P, onClose: () => setWizard(false) }) : null),
         toastMsg ? h('div', { className: cx('wb-toast', toastMsg.kind), role: 'status' }, toastMsg.text) : null,
@@ -828,7 +900,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const steps = ['填凭据', '认管理员', '选准入', '配 MCP']
       const finish = async () => {
         setBusy(true)
-        await post('/save', { config: { ...cfg, setupDone: true, guideDone: true } })
+        // 只提交「走完向导」这两个标记。以前的 {...cfg} 会拿打开向导那一刻的
+        // 快照把整份配置盖回去 —— 向导里刚选好的准入模式就是这么被静默撤销的。
+        await post('/save', { config: { setupDone: true, guideDone: true } })
         setBusy(false)
         toast('配置好了，可以聊了', 'ok')
         void reload()
@@ -847,7 +921,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         if (r?.ok) { toast('管理员加好了', 'ok'); setStep(2) } else toast(r?.message || '失败', 'err')
       }
       const saveMode = async () => {
-        const r = await post('/save', { config: { ...cfg, accessMode: mode } })
+        // 同样只发这一个字段，别把打开向导时的 cfg 快照夹带出去。
+        const r = await post('/save', { config: { accessMode: mode } })
         if (r?.ok) setStep(3)
       }
       const saveMcp = async () => {
@@ -918,6 +993,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     exports.inject = inject
     exports.WeComPage = WeComPage
     exports.ChatIcon = ChatIcon
+    exports.diffConfig = diffConfig   // 纯函数，给 dev/lost-update.mjs 钉住增量语义
+    exports.buildPatch = buildPatch
+    exports.applyEdits = applyEdits
     return module.exports
   },
 })
