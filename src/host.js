@@ -655,10 +655,11 @@ export function apply(ctx) {
     const patch = body.config && typeof body.config === 'object' ? body.config : body
     const next = { ...cfg, ...patch }
     delete next.secret
-    // 管理员池不走这条接口：面板拿到的 admin.mcp 是布尔（只表示「配没配」），
-    // 原样存回来就会把 8 个 URL 覆写成 "true"。增删管理员、改 MCP 一律走
-    // /admin/add、/admin/remove、/admin/mcp，这里的 patch.admins 直接丢掉。
+    // 这两样不走 /save：面板 draft 是加载时的快照，用户在别处改完再回来保存，
+    // 旧快照会把新值冲掉。管理员池（mcp 下发的是布尔，存回来会变成 "true"）走
+    // /admin/*；工作区目录走 /workspace/migrate。都保留服务端当前值。
     next.admins = cfg.admins
+    next.workspaceDir = cfg.workspaceDir
     // 密钥单独收，不进 config
     if (typeof body.secret === 'string' && body.secret.trim()) {
       await secrets.set('WECOM_BOT_SECRET', body.secret.trim())
