@@ -598,12 +598,11 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       }
       const migrate = async () => {
         if (!dir.trim()) return toast('先填个目录', 'err')
-        if (!probe?.ok) return toast('先点「检查目录」确认能写', 'err')
         if (!window.confirm('切到「' + dir.trim() + '」？\n\n老会话还在老工作区里能看到，但下次有人发消息会在新目录里开新会话。')) return
         setBusy(true)
         const r = await post('/workspace/migrate', { dir: dir.trim() })
         setBusy(false)
-        if (r?.ok) { toast(r.message || '已迁移', 'ok'); void load(); void reload() }
+        if (r?.ok) { toast(r.message || '已迁移', 'ok'); setProbe(null); void load(); void reload() }
         else toast(r?.message || '迁移失败', 'err')
       }
       return h('div', null,
@@ -621,8 +620,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           })),
         h('div', { className: 'wb-row', style: { marginTop: 10 } },
           h(Btn, { onClick: () => void check(), disabled: busy }, '检查目录'),
-          h(Btn, { kind: 'primary', onClick: () => void migrate(), disabled: busy || !probe?.ok }, '迁移到新目录'),
-          probe ? h('span', { className: cx('wb-small', probe.ok ? 'wb-dim' : 'wb-err') }, probe.message) : h('span', { className: 'wb-dim wb-small' }, '先检查一下再迁移')),
+          h(Btn, { kind: 'primary', onClick: () => void migrate(), disabled: busy }, '迁移到新目录'),
+          probe ? h('span', { className: cx('wb-small', probe.ok ? 'wb-dim' : 'wb-err') }, probe.message) : null),
         h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } },
           '留空用默认 %USERPROFILE%\\WeComBot\\chats。迁移只改 DSH 会话放哪，不影响企微那边任何设置。'))
     }

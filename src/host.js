@@ -655,6 +655,10 @@ export function apply(ctx) {
     const patch = body.config && typeof body.config === 'object' ? body.config : body
     const next = { ...cfg, ...patch }
     delete next.secret
+    // 管理员池不走这条接口：面板拿到的 admin.mcp 是布尔（只表示「配没配」），
+    // 原样存回来就会把 8 个 URL 覆写成 "true"。增删管理员、改 MCP 一律走
+    // /admin/add、/admin/remove、/admin/mcp，这里的 patch.admins 直接丢掉。
+    next.admins = cfg.admins
     // 密钥单独收，不进 config
     if (typeof body.secret === 'string' && body.secret.trim()) {
       await secrets.set('WECOM_BOT_SECRET', body.secret.trim())

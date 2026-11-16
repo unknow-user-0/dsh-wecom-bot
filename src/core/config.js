@@ -165,7 +165,9 @@ function normalize(c) {
     const mcp = {}
     for (const k of ['msg', 'mail', 'doc', 'todo', 'schedule', 'meeting', 'disk', 'contact']) {
       const v = String(a?.mcp?.[k] || '').trim()
-      if (v) mcp[k] = v
+      // 只认 http(s) 开头的地址。面板下发的 mcp 是布尔（true=配过），
+      // 万一它被原样存回来，这里必须当没配，绝不能把 "true" 当成 URL。
+      if (/^https?:\/\//i.test(v)) mcp[k] = v
     }
     admins.push({ userid, name: String(a?.name || '').trim(), role, addedAt: Number(a?.addedAt) || Date.now(), mcp, quotaTokens: Number(a?.quotaTokens) || 0 })
   }
