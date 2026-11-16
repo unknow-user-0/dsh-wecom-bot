@@ -546,10 +546,6 @@ export function apply(ctx) {
 
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
-  // 主人档位的 preset 里挂了 shell 工具（bash / pwsh），但面板「桌面控制」默认关。
-  // 关着的时候不是靠 preset 去掉，而是这里用 restrict 屏蔽 —— preset 是静态的，
-  // 开关是运行时的，只有 restrict 能跟着面板走。
-  const SHELL_TOOLS = ['bash', 'pwsh', 'shell', 'ops_bash', 'ops_pwsh']
   function toolsFor(level) {
     // 文件/微盘/画图 归「收发文件」这一个总闸管（默认开，老大定的）
     const fileish = (t) => /file|disk|draw/.test(t.name)
@@ -567,21 +563,11 @@ export function apply(ctx) {
   }
   function mountTools(agent, chat, level, sid) {
     const list = toolsFor(level)
-    // 桌面命令：只有主人档位 + 面板里打开「桌面控制」才留，其余一律屏蔽
-    const deny = level === 'owner' && cfg.features.desktop ? [] : SHELL_TOOLS.slice()
-    const key = list.map((t) => t.name).sort().join(',') + '|' + level + '|deny:' + deny.join(',')
+    const key = list.map((t) => t.name).sort().join(',') + '|' + level
     const prev = mounted.get(sid)
     if (prev && prev.agent === agent && prev.key === key) return
     if (prev) for (const off of prev.offs) { try { off() } catch {} }
     const offs = []
-    if (deny.length) {
-      try {
-        const off = agent.ctx.tools.restrict({ deny })
-        if (typeof off === 'function') offs.push(off)
-      } catch (error) {
-        log.debug(`屏蔽桌面命令失败：${error.message}`)
-      }
-    }
     for (const tool of list) {
       try {
         const off = agent.ctx.tools.register(tool)

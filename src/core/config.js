@@ -51,7 +51,6 @@ export const DEFAULTS = {
     browser: true,         // 浏览器操作（CDP）：默认开
     video: true,           // 看视频（dsh-video-storyboard）：默认开
     files: true,           // 收发文件/文档：默认开
-    desktop: false,        // 桌面命令（shell/pwsh）：默认关，最危险
     memory: true,          // 记忆（自带实现）
     mcpWrite: false,       // MCP 写操作（建文档/发邮件/建待办）：默认关
     mcpSendAsMe: false,    // MCP 以管理员真人身份发消息：默认关，且需「用我的身份」闸门

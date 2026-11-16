@@ -748,10 +748,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         ['memory', '记忆', '四层记忆（人 / 场景 / 技能 / 公共），跨场景召回会标来源。'],
         ['mcpWrite', 'MCP 写操作', '文档/待办/日程/微盘的增改。关了就只能读。'],
         ['mcpSendAsMe', '以管理员身份发消息', '署名是真人不是机器人。只在管理员明确说了「用我的身份」时才该开。'],
-        ['desktop', '桌面控制', '本插件**没有**这个能力（只有 shell 与浏览器），开着也没用，留着是为了跟别人对齐。'],
       ]
       return h('div', { className: 'wb-page' },
-        h(Card, { title: '能力开关', hint: '开源默认：浏览器 / 视频 / 文件文档 开；桌面控制 / MCP 写 / 真人身份发消息 关。' },
+        h(Card, { title: '能力开关', hint: '开源默认：浏览器 / 视频 / 文件文档 开；MCP 写 / 真人身份发消息 关。' },
           F.map(([k, name, desc]) => h('div', { key: k, className: 'wb-between' },
             h('div', null, h('div', null, name), h('div', { className: 'wb-dim wb-small' }, desc)),
             h(Switch, { on: !!draft.features?.[k], onChange: (v) => setD('features.' + k, v) })))),
