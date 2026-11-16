@@ -339,11 +339,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
                 h('span', { className: 'wb-pill' }, '管理员 ' + cfg.admins.length),
                 h('span', { className: 'wb-pill' }, 'v' + st.version))),
             h('div', { className: 'wb-hero-side' },
-              h('div', { className: 'wb-switch-row' }, h('span', { className: 'lbl' }, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })),
-              h('div', { className: 'wb-switch-row' },
-                h('span', { className: 'lbl' }, '长任务'),
-                h(Switch, { on: !!cfg.longTasks, onChange: (v) => quickToggle('longTasks', v) }),
-                h(Tip, { end: true, text: '打开后管理员私聊会多两套工具：后台任务（长活丢后台跑，你继续聊，跑完再取结果）和定时任务（让它到点自己干活，比如「每天早上九点把昨天的订单汇总发我」）。群里和普通成员永远拿不到。' })))),
+              h('div', { className: 'wb-switch-row' }, h('span', { className: 'lbl' }, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })))),
           h('div', { className: 'wb-nav' },
             h('div', { className: 'wb-nav-in' },
               TABS.map((t) => h('button', {
