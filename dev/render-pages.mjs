@@ -76,6 +76,44 @@ const ROUTES = {
   '/speakup/state': { ok: true, state: { day: '2026-11-16', count: 1, nextAt: now + 3600e3, last: now - 7200e3 }, enabled: false },
   '/imagegen': { ok: true, enabled: false, config: CONFIG.imageGen },
   '/sessions': { ok: true, rows: [{ key: 'dm:wofL_…', sessionId: 'session-abc', preset: 'wecom-owner', level: 'owner', title: '企业微信 · 老大（管理员）', createdAt: now - 86400e3 }] },
+  // 视频站登录：故意给「jar 里一条都没有」的状态 —— 这正是用户第一次点进来时的样子，
+  // 也是那个死锁 bug（未登录就不渲染保存按钮）最容易复现的态。
+  '/video/login': {
+    ok: true,
+    jarFile: 'C:\\Users\\Haha\\.dsh\\plugins-data\\wecom-bot\\video\\cookies.txt',
+    jarExists: false,
+    jarBytes: 0,
+    jarTotal: 0,
+    videoConfigFile: 'C:\\Users\\Haha\\.dsh\\video.json',
+    videoConfigCookies: '',
+    jarInUse: false,
+    sites: [
+      { id: 'douyin', name: '抖音', url: 'https://www.douyin.com/', hint: '抖音匿名基本什么都看不了，必须登录。', loggedIn: false, count: 0, keys: [], sessionOnly: 0 },
+      { id: 'bili', name: 'B站', url: 'https://www.bilibili.com/', hint: 'B 站匿名能看大部分，登录后能看更高清晰度和会员内容。', loggedIn: false, count: 0, keys: [], sessionOnly: 0 },
+    ],
+  },
+  '/video/login/probe': { ok: true, connected: false, sites: [] },
+  '/asr': {
+    ok: true,
+    state: 'down',
+    baseUrl: 'http://127.0.0.1:8080',
+    model: 'whisper-1',
+    language: 'zh',
+    keySet: false,
+    enabled: true,
+    file: 'C:\\Users\\Haha\\.dsh\\asr.json',
+    hostService: false,
+    managed: false,
+    manageStart: '',
+    probe: null,
+    discovery: [{ dir: 'G:\\蓝色大肥鱼\\asr', script: 'G:\\蓝色大肥鱼\\asr\\启动-ASR.bat', suggestBaseUrl: 'http://127.0.0.1:8080', label: '启动-ASR.bat' }],
+    message: '配了地址但连不上，服务没启动',
+  },
+  '/asr/hint': { ok: true, options: [
+    { id: 'whisper', name: 'whisper.cpp（全离线，推荐）', detail: '模型放本地，语音不出这台机器。模型路径不能含中文。' },
+    { id: 'siliconflow', name: '云端 SiliconFlow', detail: '要 API Key，语音会发给第三方。' },
+    { id: 'host', name: '宿主自带', detail: '装了语音服务的话插件直接用。' },
+  ] },
 }
 const fetchJson = async (p) => {
   const path = String(p).replace('/wecom-bot/api', '').split('?')[0]

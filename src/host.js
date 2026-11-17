@@ -34,6 +34,7 @@ import { buildBrowserTools } from './tools/browser.js'
 import { buildVideoTools } from './tools/video.js'
 import { createBrowserManager } from './browser/manager.js'
 import { createVideoLogin } from './video/login.js'
+import { exposeYtdlp } from './video/binaries.js'
 import { createAsr } from './video/asr.js'
 
 export const name = 'wecom-bot'
@@ -542,6 +543,10 @@ export function apply(ctx) {
   // 启动后头几秒进来的消息拿到的工具清单里没有视频工具；等数组被填上，
   // 已经在跑的会话也不会重挂（mountTools 的 key 只在下次消息时才算）。
   // 改成 Promise 后 toolsFor 是 async，等它一次就永远拿到完整清单。
+  // yt-dlp 必须在 buildVideoTools 之前塞进 process.env：上游的 discoverYtdlp() 只认
+  // DSH_YTDLP_PATH / PATH / pip 脚本目录三条路，而 DSH 桌面版读不到用户 setx 设的环境变量，
+  // 用户把 exe 放 ~/.dsh/tools/ 下时三条路全落空（真机上 tried=[]，抖音链接一律报找不到）。
+  const ytdlpInfo = exposeYtdlp({ log })
   const videoReady = buildVideoTools({ ctx, log })
     .catch((error) => {
       log.warn(`看视频能力没接上：${error.message}`)
@@ -658,10 +663,10 @@ export function apply(ctx) {
     browser: browserSelfCheck(),
   }))
 
-  /** 看视频链路自检：模块找没找到 / 工具实际挂上几个 / ffmpeg 在不在 / 附件服务可用否 */
+  /** 看视频链路自检：模块找没找到 / 工具实际挂上几个 / ffmpeg 在不在 / yt-dlp 接没接上 / 附件服务可用否 */
   function videoSelfCheck() {
     const r = videoReport
-    if (!r) return { state: 'loading', message: '还在接', tools: [], ffmpeg: '', dir: '' }
+    if (!r) return { state: 'loading', message: '还在接', tools: [], ffmpeg: '', dir: '', ytdlp: ytdlpInfo }
     const ok = Array.isArray(r.ok) ? r.ok : []
     const failed = Array.isArray(r.failed) ? r.failed : []
     const mountFailed = Array.isArray(r.mountFailed) ? r.mountFailed : []
@@ -673,6 +678,8 @@ export function apply(ctx) {
       mountFailed,
       ffmpeg: r.ffmpeg || '',
       dir: r.dir || '',
+      // yt-dlp 决定「链接能不能看」（抖音/B站），ffmpeg 决定「能不能合流成片」，两件事
+      ytdlp: ytdlpInfo,
       // 上游工具要 ctx.attachments.saveImage 才能把分镜图提交成附件，缺了只能出纯文本
       canSaveImage: typeof ctx.attachments?.saveImage === 'function',
     }
@@ -711,6 +718,8 @@ export function apply(ctx) {
   // ---------- 视频站登录（抖音 / B站） ----------
   // 浏览器工具和登录模块共用同一个专用浏览器实例，所以这里绝不另起一个。
   route('/video/login', () => videoLogin.status())
+  // 实时探测：用户点完「去登录」在浏览器里操作，面板要能立刻看到登没登
+  route('/video/login/probe', () => videoLogin.probe())
   route('/video/login/open', async (req) => {
     const body = await readBody(req)
     return videoLogin.openLogin(body.site)

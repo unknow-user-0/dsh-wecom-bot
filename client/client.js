@@ -805,10 +805,18 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [warned, setWarned] = useState('')  // 已看过风险说明的站点
       const [agree, setAgree] = useState({})    // 勾了「确认是我本人的 cookie」
       const [text, setText] = useState({})      // 粘贴的内容
+      const [live, setLive] = useState({})      // 浏览器里的实时登录状态（不落盘）
 
       const load = useCallback(async () => {
         const r = await get('/video/login')
         if (r?.ok !== false) setSt(r)
+        // 顺带探一次浏览器现状：用户在浏览器里刚登完，这里要能反映出来
+        const p = await get('/video/login/probe')
+        if (p?.ok) {
+          const m = { connected: p.connected === true }
+          for (const s of p.sites || []) m[s.id] = s
+          setLive(m)
+        }
       }, [])
       useEffect(() => { void load() }, [load])
 
@@ -816,7 +824,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         setBusy(site + ':open')
         const r = await post('/video/login/open', { site })
         setBusy('')
-        toast(r?.ok ? '浏览器开好了，去那边登录，登完回来点「存下登录态」' : r?.message || '打不开浏览器', r?.ok ? 'ok' : 'err')
+        toast(r?.ok ? '浏览器开好了，去那边登录，登完回来点「我登录好了，存下登录态」' : r?.message || '打不开浏览器', r?.ok ? 'ok' : 'err')
+        // 浏览器起来后立刻探一次，让用户知道面板已经盯上了
+        if (r?.ok) void load()
       }
       const doSave = async (site) => {
         setBusy(site + ':save')
@@ -878,15 +888,19 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           h('div', null,
             h('div', null, s.name, s.loggedIn
               ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#16a34a' } }, `已登录（${s.count} 条）`)
-              : h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '未登录')),
+              : h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '未登录'),
+              // 浏览器里当下登没登，跟 jar 里存没存是两件事，两个都告诉用户
+              live[s.id]?.loggedIn
+                ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#2563eb' } }, '· 浏览器里已登录，点右边存下来')
+                : (live.connected ? h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '· 浏览器里还没登') : null)),
             h('div', { className: 'wb-dim wb-small' }, s.hint || '')),
           h('div', { style: { display: 'flex', gap: 6 } },
             h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doOpen(s.id) },
               busy === s.id + ':open' ? '打开中…' : (s.loggedIn ? '重新登录' : '去登录')),
-            s.loggedIn
-              ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doSave(s.id) },
-                busy === s.id + ':save' ? '保存中…' : '存下登录态')
-              : null,
+            // 常显：第一次登录时 jar 是空的，以前这里靠 s.loggedIn 才渲染，
+            // 结果「要看到按钮得先存过 jar，要存 jar 得先有按钮」死锁了
+            h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doSave(s.id) },
+              busy === s.id + ':save' ? '保存中…' : '我登录好了，存下登录态'),
             s.loggedIn
               ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doClear(s.id) }, '清除')
               : null)),
@@ -902,6 +916,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         hint: st?.jarInUse
           ? '登录态已生效，看视频时会带上。'
           : '不登录也能看，但抖音基本看不了、B 站只有低清。',
+        right: h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void load() }, '刷新状态'),
       },
         sites.length === 0 ? h(Empty, null, '读取中…') : sites.map(siteRow),
         st?.jarFile

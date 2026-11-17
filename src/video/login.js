@@ -252,13 +252,22 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
     }
   }
 
-  /** 从专用浏览器导 cookie，过滤出这个站点的，存进 jar */
+  /**
+   * 从专用浏览器导 cookie，过滤出这个站点的，存进 jar。
+   *
+   * 浏览器没连着时先自己接一次（ensure force）：用户登录完把窗口关了、或者 DSH 重启过，
+   * 这里还应该努力接回去，而不是甩一句「浏览器没开着」让人重新登一遍。
+   * 接不回来才报错，而且要说清楚是哪种情况。
+   */
   async function saveLogin(siteId) {
     const site = siteOf(siteId)
     const bm = getBrowser()
     if (!bm) return { ok: false, message: '浏览器模块没初始化' }
     if (!bm.get()?.connected?.()) {
-      return { ok: false, message: '浏览器没开着。先点「登录」打开它，登录完再保存' }
+      const r = await bm.ensure({ force: true }).catch((error) => ({ ok: false, message: error.message }))
+      if (!r?.ok) {
+        return { ok: false, message: `浏览器没开着，也接不回来（${r?.message || '未知原因'}）。重新点一次「去登录」` }
+      }
     }
     let cookies = []
     try {
@@ -270,6 +279,33 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
     try { await bm.get().show(false) } catch {}
     log?.info?.(`${site.name} 登录态：${out.message}`)
     return { ...out, status: status() }
+  }
+
+  /**
+   * 实时看浏览器里现在到底登没登 —— 不落盘，只读。
+   *
+   * 为什么要单独一个：用户点完「去登录」在浏览器里操作，面板上得能立刻看到变化，
+   * 否则他不知道该不该点保存。而 status() 只读 jar，反映不了浏览器里的当下状态。
+   * 浏览器没连着时返回 connected:false，面板据此提示「先点去登录」。
+   */
+  async function probe() {
+    const bm = getBrowser()
+    if (!bm) return { ok: false, connected: false, message: '浏览器模块没初始化' }
+    const b = bm.get()
+    if (!b?.connected?.()) return { ok: true, connected: false, sites: [] }
+    let cookies = []
+    try {
+      cookies = await b.exportCookies()
+    } catch (error) {
+      return { ok: true, connected: true, sites: [], message: `读不到浏览器 cookie：${error.message}` }
+    }
+    const sites = SITES.map((s) => {
+      const mine = cookies.filter((c) => belongsTo(c.domain, s.domains))
+      const names = new Set(mine.map((c) => c.name))
+      const keys = s.keys.filter((k) => names.has(k))
+      return { id: s.id, loggedIn: keys.length > 0, count: mine.length, keys }
+    })
+    return { ok: true, connected: true, sites }
   }
 
   /**
@@ -308,5 +344,5 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
     return { ok: true, message: site ? `${site.name} 的登录态已清掉` : '全部登录态已清掉', status: status() }
   }
 
-  return { status, openLogin, saveLogin, saveManual, clear, jarFile, videoConfigFile }
+  return { status, probe, openLogin, saveLogin, saveManual, clear, jarFile, videoConfigFile }
 }
