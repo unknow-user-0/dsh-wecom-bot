@@ -819,12 +819,21 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         }
       }, [])
       useEffect(() => { void load() }, [load])
+      // 自动保存是后台发生的，人还在浏览器那边，面板得自己把结果拉回来。
+      // 依赖用 watching.site 而不是整个对象：status() 每次都新建对象，用对象会让
+      // 这个 interval 每 3 秒重建一次。
+      const watchingSite = st?.watching?.site || ''
+      useEffect(() => {
+        if (!watchingSite) return undefined
+        const t = setInterval(() => { void load() }, 3000)
+        return () => clearInterval(t)
+      }, [watchingSite, load])
 
       const doOpen = async (site) => {
         setBusy(site + ':open')
         const r = await post('/video/login/open', { site })
         setBusy('')
-        toast(r?.ok ? '浏览器开好了，去那边登录，登完回来点「我登录好了，存下登录态」' : r?.message || '打不开浏览器', r?.ok ? 'ok' : 'err')
+        toast(r?.ok ? (r.message || '浏览器开好了，去那边登录，登完会自动存下来') : r?.message || '打不开浏览器', r?.ok ? 'ok' : 'err')
         // 浏览器起来后立刻探一次，让用户知道面板已经盯上了
         if (r?.ok) void load()
       }
@@ -890,17 +899,20 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#16a34a' } }, `已登录（${s.count} 条）`)
               : h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '未登录'),
               // 浏览器里当下登没登，跟 jar 里存没存是两件事，两个都告诉用户
-              live[s.id]?.loggedIn
-                ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#2563eb' } }, '· 浏览器里已登录，点右边存下来')
-                : (live.connected ? h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '· 浏览器里还没登') : null)),
+              st?.watching?.site === s.id
+                ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#2563eb' } }, '· 正在盯着，登录完自动存')
+                : (live[s.id]?.loggedIn
+                  ? h('span', { className: 'wb-small', style: { marginLeft: 8, color: '#2563eb' } }, '· 浏览器里已登录')
+                  : (live.connected ? h('span', { className: 'wb-small wb-dim', style: { marginLeft: 8 } }, '· 浏览器里还没登') : null))),
             h('div', { className: 'wb-dim wb-small' }, s.hint || '')),
           h('div', { style: { display: 'flex', gap: 6 } },
             h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doOpen(s.id) },
               busy === s.id + ':open' ? '打开中…' : (s.loggedIn ? '重新登录' : '去登录')),
             // 常显：第一次登录时 jar 是空的，以前这里靠 s.loggedIn 才渲染，
-            // 结果「要看到按钮得先存过 jar，要存 jar 得先有按钮」死锁了
+            // 结果「要看到按钮得先存过 jar，要存 jar 得先有按钮」死锁了。
+            // 现在登录完会自动存，这个按钮是「我确认好了，立刻存」的显式入口。
             h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doSave(s.id) },
-              busy === s.id + ':save' ? '保存中…' : '我登录好了，存下登录态'),
+              busy === s.id + ':save' ? '保存中…' : '立即存下'),
             s.loggedIn
               ? h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void doClear(s.id) }, '清除')
               : null)),

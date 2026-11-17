@@ -121,10 +121,13 @@ function compileOutputSpec(output) {
  * 面板和 /state 完全看不出是「没装」「加载失败」还是「schema 编译失败」，
  * 真机上就出现过「日志说已接上、实际六个工具全挂不上」还查不出来的情况。
  *
- * @param {{ctx:object, log:object}} o
+ * @param {{ctx:object, log:object, douyin?:object}} o
+ *   douyin —— 抖音解析器（`createDouyinResolver()` 的返回值）。给了它就把抖音链接
+ *   在执行前换成「已下好的本地 mp4」：yt-dlp 的抖音提取器已被 Argus 签名墙打死，
+ *   换成浏览器自己抠直链那条路（见 src/video/douyin.js 顶部注释）。
  * @returns {Promise<{ok:object[], failed:object[], reason:string, dir:string, ffmpeg:string}>}
  */
-export async function buildVideoTools({ ctx, log } = {}) {
+export async function buildVideoTools({ ctx, log, douyin } = {}) {
   const none = (reason) => ({ ok: [], failed: [], reason, dir: '', ffmpeg: '' })
   const found = findVideoPlugin()
   if (!found) {
@@ -157,12 +160,20 @@ export async function buildVideoTools({ ctx, log } = {}) {
     if (spec.timeoutMs) tool.timeoutMs = spec.timeoutMs
     if (typeof spec.isConcurrencySafe === 'function') tool.isConcurrencySafe = spec.isConcurrencySafe
     tool.execute = async (args, exec) => {
-      try {
-        return await spec.execute(args, exec)
-      } catch (error) {
-        // 工具异常不该把整个 turn 炸掉；上游文案通常是给人看的，原样往上抛更利于排查
-        throw error
+      // 抖音链接在交给上游之前换成「本地文件」。
+      // 为什么不在上游改：node_modules 会被重装覆盖，而且这是抖音一家的事，
+      // 不该污染通用管线。上游所有视频工具都收 `input`（路径或链接），
+      // 换成本地路径对它完全透明。
+      // 只换有 input 的工具；video_help 之类没有 input，直接跳过。
+      if (douyin && args && typeof args.input === 'string') {
+        try {
+          args = { ...args, input: await douyin.resolve(args.input) }
+        } catch (error) {
+          // 抛出去，模型和用户都能看到真正原因；吞掉只会让它继续拿链接硬跑一遍 yt-dlp。
+          throw new Error(`抖音这条路走不通：${error.message}`)
+        }
       }
+      return await spec.execute(args, exec)
     }
     return tool
   }

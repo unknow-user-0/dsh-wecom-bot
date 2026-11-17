@@ -12,10 +12,9 @@
 // 没写就绝不碰用户的进程。面板上的「启动」按钮同样只走这一条路。
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
-
 /** 本机服务不需要 key（与上游 isLoopback 同一套判据） */
 export function isLoopback(baseUrl) {
   try {
@@ -167,7 +166,8 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
       file: configFile(),
       hostService: hasHost,
       managed,
-      manageStart: managed ? String(c.manage.start) : '',
+      // 给人看的启动命令摘要：数组要按「程序名 + 程序名」拼，不能直接 String() 拍成逗号串。
+      manageStart: managed ? describeStart(c.manage.start) : '',
       probe,
       discovery: discoverLocal(safeExtraDirs()),
       message: hasHost
@@ -195,8 +195,13 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
     }
     if (typeof patch.enabled === 'boolean') next.enabled = patch.enabled
     if (patch.manageStart !== undefined) {
-      const s = String(patch.manageStart || '').trim()
-      if (s) next.manage = { ...(cur.manage || {}), start: s }
+      // 允许三种：字符串 / 字符串数组 / 数组的数组（多进程）。空一律删掉。
+      const raw = patch.manageStart
+      const list = Array.isArray(raw)
+        ? raw.map((x) => (Array.isArray(x) ? x.map(String) : String(x))).filter((x) => (Array.isArray(x) ? x[0] : x))
+        : String(raw || '').trim()
+      const empty = Array.isArray(list) ? list.length === 0 : !list
+      if (!empty) next.manage = { ...(cur.manage || {}), start: list }
       else if (next.manage) {
         delete next.manage.start
         if (!Object.keys(next.manage).length) delete next.manage
@@ -211,6 +216,21 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
     return { ok: true, file: out.file }
   }
 
+  /**
+   * 把 manage.start 说成人话，给面板显示用。
+   * 数组不能 String() —— 会变成 "exe,-m,x,node,bridge.mjs" 一串逗号，用户看不出来是个什么。
+   */
+  function describeStart(raw) {
+    const plans = parseStart(raw)
+    if (!plans.length) return ''
+    return plans
+      .map((p) => {
+        if (typeof p === 'string') return basename(p)
+        return [basename(p[0]), ...p.slice(1)].join(' ')
+      })
+      .join(' ＋ ')
+  }
+
   /** 把一个启动脚本写进 manage.start 并立刻起一次 */
   async function useDiscovered(script, baseUrl) {
     const r = save({ baseUrl: baseUrl || 'http://127.0.0.1:8080', manageStart: script })
@@ -221,6 +241,52 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
   let starting = null
 
   /**
+   * 把 manage.start 归一成「要跑的命令列表」，每条是 [exe, ...args]。
+   *
+   * 支持三种写法（前两种与上游 asr-lifecycle.js 一致）：
+   *   "D:/asr/start.bat"              → 走 cmd /c（bat 要 CRLF，见下面 normalizeBat）
+   *   ["D:/whisper.exe", "-m", "x"]   → 直接 spawn，不经过 cmd
+   *   [["a.exe","-x"], ["node","b"]]  → 起多个进程（本机这套就是 whisper-server + 适配层）
+   *
+   * 为什么数组是首选：Windows 上批处理对行尾/编码极其敏感 ——
+   * 实测 `启动-ASR.bat` 是 LF 行尾时，cmd.exe 会把 rem 注释里的中文片段当命令执行，
+   * 刷一屏「'xxx' 不是内部或外部命令」，而 exit code 还是 0（看着像成功，实际什么都没起）。
+   */
+  function parseStart(raw) {
+    if (Array.isArray(raw)) {
+      // [[exe,args],[exe,args]] 还是 [exe, arg, arg]？看第一项是不是数组。
+      if (raw.length && Array.isArray(raw[0])) {
+        return raw.map((c) => (Array.isArray(c) ? c.map(String) : [String(c)])).filter((c) => c[0])
+      }
+      return raw.length ? [raw.map(String)] : []
+    }
+    const s = String(raw || '').trim()
+    return s ? [s] : []
+  }
+
+  /**
+   * LF 行尾的 bat 会被 cmd.exe 读坏，先另存一份 CRLF 的临时副本再跑。
+   * 不改用户原文件 —— 那是他自己维护的东西。
+   */
+  function normalizeBat(file) {
+    try {
+      const buf = readFileSync(file)
+      let text = buf.toString('utf8')
+      if (!/\r\n/.test(text)) {
+        text = text.replace(/\r?\n/g, '\r\n')
+        const tmp = join(dirname(file), `.${Date.now().toString(36)}-crlf.bat`)
+        writeFileSync(tmp, text, 'utf8')
+        log?.info?.(`ASR：${file} 是 LF 行尾，已另存 CRLF 副本再跑（cmd.exe 读不了 LF）`)
+        return tmp
+      }
+      return file
+    } catch (error) {
+      log?.warn?.(`ASR：检查 bat 行尾失败（${error.message}），照原样跑`)
+      return file
+    }
+  }
+
+  /**
    * 按 manage.start 把服务拉起来，然后等端点活。
    * 绝不 detach —— Windows 上 detached + cmd 会弹黑框（上游踩过）。
    */
@@ -228,8 +294,11 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
     if (starting) return starting
     starting = (async () => {
       const c = readConfig()
-      const cmd = String(c.manage?.start || '').trim()
-      if (!cmd) {
+      // 注意：这里绝不能 String(...) 一把梭 —— manage.start 可以是数组，
+      // 字符串化会把它拍成 "exe,-m,xxx" 一个逗号串，spawn 直接 ENOENT（踩过）。
+      const rawStart = c.manage?.start
+      const cmd = Array.isArray(rawStart) ? rawStart : String(rawStart || '').trim()
+      if (!cmd || (Array.isArray(cmd) && !cmd.length)) {
         return {
           ok: false,
           message: '没配启动命令。本机有 ASR 的话在下面「发现的本机服务」里点一键配置；没有就按提示去装一个。',
@@ -240,16 +309,58 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
       const already = await probeEndpoint(c.baseUrl)
       if (already.ok) return { ok: true, message: '服务本来就在跑', probe: already }
 
-      const isBat = /\.(bat|cmd)$/i.test(cmd)
-      try {
-        const child = isBat
-          ? spawn('cmd.exe', ['/c', cmd], { stdio: 'ignore', windowsHide: true })
-          : spawn(cmd, [], { stdio: 'ignore', windowsHide: true, shell: false })
-        child.on('error', (error) => log?.warn?.(`ASR 启动失败：${error.message}`))
+      // 启动并且把「到底哪一步失败了」记下来。
+      // 真机上出现过：同一个 bat 在有人手动跑时 153ms 就退出、两个端口一直是 0 ——
+      // 根因是 bat 是 LF 行尾，cmd.exe 把注释里的中文当命令执行完就正常退出（code=0），
+      // 真正的 whisper-server 根本没起。所以这里不猜：exit code、stderr 尾、stdout 尾全收回来。
+      const diag = { mode: '', pids: [], exitCodes: [], stderr: '', stdout: '' }
+      const spawnOne = (exe, args) => {
+        const child = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+        const take = (buf, key) => { diag[key] = (diag[key] + buf.toString('utf8')).slice(-4000) }
+        child.stdout?.on('data', (b) => take(b, 'stdout'))
+        child.stderr?.on('data', (b) => take(b, 'stderr'))
+        child.on('error', (error) => { diag.stderr += `\n[spawn error] ${error.message}` })
+        child.on('exit', (code) => { diag.exitCodes.push(code) })
         child.unref?.()
+        return child
+      }
+
+      const plans = parseStart(cmd)
+      try {
+        for (const plan of plans) {
+          if (typeof plan === 'string') {
+            const file = plan
+            const isBat = /\.(bat|cmd)$/i.test(file)
+            if (isBat) {
+              const fixed = normalizeBat(file)
+              diag.mode = `cmd /c ${file}`
+              const child = spawnOne('cmd.exe', ['/c', fixed])
+              diag.pids.push(child.pid || 0)
+            } else {
+              diag.mode = `direct ${file}`
+              const child = spawnOne(file, [])
+              diag.pids.push(child.pid || 0)
+            }
+          } else {
+            const [exe, ...args] = plan
+            const isBat = /\.(bat|cmd)$/i.test(exe)
+            if (isBat) {
+              const fixed = normalizeBat(exe)
+              diag.mode += `${diag.mode ? ' + ' : ''}cmd /c ${exe}`
+              const child = spawnOne('cmd.exe', ['/c', fixed, ...args])
+              diag.pids.push(child.pid || 0)
+            } else {
+              diag.mode += `${diag.mode ? ' + ' : ''}${exe}`
+              const child = spawnOne(exe, args)
+              diag.pids.push(child.pid || 0)
+            }
+          }
+        }
       } catch (error) {
         return { ok: false, message: `起不来：${error.message}` }
       }
+      if (!diag.pids.length) return { ok: false, message: '启动命令是空的，没东西可跑' }
+
       // 等端点活。whisper large-v3 加载模型要十几秒，别急。
       const deadline = Date.now() + Math.max(5000, waitMs)
       while (Date.now() < deadline) {
@@ -257,10 +368,25 @@ export function createAsr({ log, getHostService, getExtraDirs }) {
         const p = await probeEndpoint(c.baseUrl, { timeoutMs: 1500 })
         if (p.ok) {
           log?.info?.('ASR 服务已就绪')
-          return { ok: true, message: '服务起来了', probe: p }
+          return { ok: true, message: '服务起来了', probe: p, mode: diag.mode }
         }
       }
-      return { ok: false, message: '启动命令跑了，但端点一直没活。看服务自己的日志（常见：模型路径含中文、端口被占）' }
+
+      // 走到这里说明没起来。全退出 + 没输出，多半是脚本自己就失败了。
+      const tail = (s) => String(s || '').trim().split('\n').slice(-4).join(' / ')
+      const detail = [
+        `方式：${diag.mode}`,
+        `退出码：${diag.exitCodes.length ? diag.exitCodes.join(',') : '进程还在'}`,
+        tail(diag.stderr) ? `错误输出：${tail(diag.stderr)}` : '',
+        tail(diag.stdout) ? `普通输出：${tail(diag.stdout)}` : '',
+      ].filter(Boolean).join('；')
+      log?.warn?.(`ASR 启动失败：${detail}`)
+      return {
+        ok: false,
+        // 把真实原因原样给用户看。含糊的「端点没活」帮不上任何忙 —— 这次就是被它耽误了。
+        message: `服务没起来。${detail}`, 
+        detail: diag,
+      }
     })().finally(() => { starting = null })
     return starting
   }

@@ -227,6 +227,8 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
       // 上游读的是 video.json 的 cookies 字段；跟我们的 jar 不一致时面板要提醒
       videoConfigCookies: String(vc.cookies || ''),
       jarInUse: String(vc.cookies || '') === jarFile,
+      // 正在自动盯着的站点：面板据此显示「登录完会自动存」
+      watching: watch ? { site: watch.siteId, until: watch.until } : null,
       sites,
     }
   }
@@ -244,12 +246,68 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
     const b = bm.get()
     await b.goto(site.url, 20000)
     await b.show(true)
+    // 打开就顺手盯上：人登完常常直接走，不会回来点保存
+    startWatch(site.id)
     return {
       ok: true,
       site: site.id,
       name: site.name,
-      message: `已打开${site.name}，请在那个窗口里登录。登录完成后回到这里点「保存登录态」。`,
+      autoSave: true,
+      message: `已打开${site.name}，在那个窗口里登录就行，登完会自动存下来（最多等 ${Math.round(AUTO_SAVE_MAX_MS / 60000)} 分钟）。`,
     }
+  }
+
+  /* ------------------------------------------------- 自动保存（登录完自己存） */
+  //
+  // 以前是纯手动：点「去登录」→ 在浏览器里登 → 回来点「保存登录态」。
+  // 实际用起来第三步经常被忘掉，面板就一直显示未登录、用户以为坏了。
+  // 现在改成打开登录页之后就后台盯着浏览器里的 cookie，一看到该站点的登录标识
+  // 出现就自动存一次；手动保存仍然保留，当作「我确认好了」的显式入口。
+  //
+  // 三条边界：
+  //   1. 只盯一个站点，最长 AUTO_SAVE_MAX_MS，到点自己停 —— 不做常驻轮询；
+  //   2. 自动存时窗口不收起（hide:false），人可能还要接着登另一个站；
+  //   3. 手动保存/清除会先把它停掉，避免自动的把手动粘进来的覆盖回去。
+  const AUTO_SAVE_EVERY_MS = 3000
+  const AUTO_SAVE_MAX_MS = 5 * 60 * 1000
+  let watch = null
+
+  /** 停掉正在盯的那个站点。reason 只用于写日志。 */
+  function stopWatch(reason) {
+    if (!watch) return
+    clearTimeout(watch.timer)
+    const siteId = watch.siteId
+    watch = null
+    if (reason) log?.info?.(`自动保存停了（${siteId}）：${reason}`)
+  }
+
+  /** 盯住某个站点的登录态，看到登录标识就自动存一次，存成即停。 */
+  function startWatch(siteId) {
+    const site = siteOf(siteId)
+    stopWatch('换了个站点')
+    const w = { siteId: site.id, timer: null, until: Date.now() + AUTO_SAVE_MAX_MS }
+    watch = w
+    const tick = async () => {
+      if (watch !== w) return
+      if (Date.now() > w.until) { stopWatch('等太久了，没等到登录'); return }
+      const b = getBrowser()?.get?.()
+      if (b?.connected?.()) {
+        let cookies = []
+        try { cookies = await b.exportCookies() } catch {}
+        const names = new Set(cookies.filter((c) => belongsTo(c.domain, site.domains)).map((c) => c.name))
+        if (site.keys.some((k) => names.has(k))) {
+          const r = await saveLogin(site.id, { auto: true, hide: false })
+          if (r?.ok) { stopWatch(`${site.name} 登录态已自动存下`); return }
+          // 存失败就继续盯，下一轮再试（比如正好在写盘）
+        }
+      }
+      if (watch !== w) return
+      w.timer = setTimeout(tick, AUTO_SAVE_EVERY_MS)
+      w.timer.unref?.()
+    }
+    w.timer = setTimeout(tick, AUTO_SAVE_EVERY_MS)
+    w.timer.unref?.()
+    log?.info?.(`${site.name}：开始自动盯登录态（最多 ${Math.round(AUTO_SAVE_MAX_MS / 60000)} 分钟）`)
   }
 
   /**
@@ -258,9 +316,13 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
    * 浏览器没连着时先自己接一次（ensure force）：用户登录完把窗口关了、或者 DSH 重启过，
    * 这里还应该努力接回去，而不是甩一句「浏览器没开着」让人重新登一遍。
    * 接不回来才报错，而且要说清楚是哪种情况。
+   *
+   * `hide` 默认 true（手动保存时把窗口收起来，表示"完事了"）。
+   * 自动保存时必须传 false —— 用户可能还要接着登另一个站，把窗口藏了等于把人赶走。
    */
-  async function saveLogin(siteId) {
+  async function saveLogin(siteId, { hide = true, auto = false } = {}) {
     const site = siteOf(siteId)
+    if (!auto) stopWatch('改成手动保存了')
     const bm = getBrowser()
     if (!bm) return { ok: false, message: '浏览器模块没初始化' }
     if (!bm.get()?.connected?.()) {
@@ -276,7 +338,9 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
       return { ok: false, message: `导不出 cookie：${error.message}` }
     }
     const out = mergeJar(site, cookies.map(fromCdp))
-    try { await bm.get().show(false) } catch {}
+    if (hide) {
+      try { await bm.get().show(false) } catch {}
+    }
     log?.info?.(`${site.name} 登录态：${out.message}`)
     return { ...out, status: status() }
   }
@@ -333,6 +397,7 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
 
   /** 清掉某个站点（或全部）的登录态 */
   function clear(siteId) {
+    stopWatch('清登录态了')
     const site = siteId ? siteOf(siteId) : null
     const kept = site ? readJar().filter((c) => !belongsTo(c.domain, site.domains)) : []
     try {
@@ -344,5 +409,5 @@ export function createVideoLogin({ dataDir, getBrowser, log }) {
     return { ok: true, message: site ? `${site.name} 的登录态已清掉` : '全部登录态已清掉', status: status() }
   }
 
-  return { status, probe, openLogin, saveLogin, saveManual, clear, jarFile, videoConfigFile }
+  return { status, probe, openLogin, saveLogin, saveManual, clear, stopWatch, jarFile, videoConfigFile }
 }

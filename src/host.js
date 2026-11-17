@@ -35,6 +35,7 @@ import { buildVideoTools } from './tools/video.js'
 import { createBrowserManager } from './browser/manager.js'
 import { createVideoLogin } from './video/login.js'
 import { exposeYtdlp } from './video/binaries.js'
+import { createDouyinResolver } from './video/douyin.js'
 import { createAsr } from './video/asr.js'
 
 export const name = 'wecom-bot'
@@ -547,7 +548,11 @@ export function apply(ctx) {
   // DSH_YTDLP_PATH / PATH / pip 脚本目录三条路，而 DSH 桌面版读不到用户 setx 设的环境变量，
   // 用户把 exe 放 ~/.dsh/tools/ 下时三条路全落空（真机上 tried=[]，抖音链接一律报找不到）。
   const ytdlpInfo = exposeYtdlp({ log })
-  const videoReady = buildVideoTools({ ctx, log })
+  // 抖音得绕开 yt-dlp：Argus 签名墙把它的 web detail 接口打成了 403（真机实测见
+  // src/video/douyin.js 顶部）。这里把浏览器抠直链那条路递给视频工具，
+  // 让 video_* 在执行前把抖音链接换成「已下好的本地 mp4」。
+  const douyin = createDouyinResolver({ getBrowser: () => browser, dataDir: DATA_DIR, log: logger.child('douyin') })
+  const videoReady = buildVideoTools({ ctx, log, douyin })
     .catch((error) => {
       log.warn(`看视频能力没接上：${error.message}`)
       return { ok: [], failed: [], reason: `异常：${error.message}`, dir: '', ffmpeg: '' }
