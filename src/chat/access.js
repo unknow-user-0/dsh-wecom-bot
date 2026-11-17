@@ -51,11 +51,22 @@ export function autoRegister(cfg, chat) {
 
 /**
  * 无权限时回给用户的文案。
- * 关键：把 userid 告诉他，让他转给管理员加白名单（企微不会自动告知）。
+ * 关键：把 userid / 群 id 告诉他，让他转给管理员加白名单（企微不会自动告知）。
+ *
+ * 群聊为什么也要给 id：管理员加群白名单时填的是 chatid，而管理员站在群里
+ * 是看不到这串东西的 —— 机器人不主动说出来，他只能去翻日志或者问开发者。
+ * 这里把群 id 和发话的人一起给出来：群 id 用来加群，人 id 用来加私聊白名单。
  */
 export function deniedReply(chat, userid) {
   if (chat.kind === 'group') {
-    return '我还没有在这个群里开通，让管理员把我加进白名单就好。'
+    const lines = [
+      '我还没有在这个群里开通，让管理员把我加进白名单就好。',
+      '',
+      `群 ID 是：\`${chat.chatId}\``,
+    ]
+    if (userid) lines.push(`你的 ID 是：\`${userid}\``)
+    lines.push('', '把群 ID 发给管理员，让他把我这边的群白名单加上就能聊了。')
+    return lines.join('\n')
   }
   return [
     '我还没被允许跟你聊天。',

@@ -468,6 +468,10 @@ export function apply(ctx) {
     const access = checkAccess(cfg, chat)
     if (!access.allowed) {
       log.info(`拦下一条（${access.reason}）：${chat.kind} ${chat.chatId} / ${chat.userId}`)
+      // 先把会话标识写进 frame，再回话 —— replyTo 里记录活动用的是 frame.__chatId，
+      // 不给的话日志栏里这条拒绝是「没有来源」的，管理员根本看不出是哪个群被拦了。
+      frame.__chatId = chat.chatId
+      frame.__chatName = (chat.kind === 'group' ? chat.groupName : chat.displayName) || ''
       await replyTo(frame, deniedReply(chat, chat.userId))
       // 管理员还没绑定任何人的话，把首个私聊者的 ID 直接告诉他，方便填进面板
       return
