@@ -23,6 +23,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { uploadMedia, isImagePath, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { asLog, fireAndForget, messageOf } from '../core/safe.js'
 
 const DEFAULT_TEXT = 'emmm...'
 /** media_id 缓存：同一张图别每条消息都重传一遍 */
@@ -30,7 +31,10 @@ const MEDIA_TTL_MS = 30 * 60 * 1000
 /** 发图失败（比如没配 MCP）后冷却，别每条消息都试一遍把日志刷满 */
 const FAIL_COOLDOWN_MS = 10 * 60 * 1000
 
-export function createPlaceholder({ getConfig, getClient, mcpFor, log }) {
+export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw }) {
+  // 外面传 logger 对象（host.js 传的就是 logger.child()）还是 (level, text) 函数都能吃。
+  // 以前这里直接按函数调 log?.(...)，而 host 传的是对象 → TypeError。
+  const log = asLog(logRaw)
   let cached = null // { key, mediaId, at }
   let failUntil = 0
   let failReason = ''
@@ -71,7 +75,7 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log }) {
     if (!isImagePath(path)) {
       failReason = `占位图不是图片格式：${extname(path)}`
       failUntil = Date.now() + FAIL_COOLDOWN_MS
-      log?.('warn', failReason)
+      log('warn', failReason)
       return
     }
     try {
@@ -95,9 +99,9 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log }) {
       }
       failReason = ''
     } catch (error) {
-      failReason = error?.message || String(error)
+      failReason = messageOf(error)
       failUntil = Date.now() + FAIL_COOLDOWN_MS
-      log?.('warn', `占位图没发出去：${failReason}（${FAIL_COOLDOWN_MS / 60000} 分钟内不再重试）`)
+      log('warn', `占位图没发出去：${failReason}（${FAIL_COOLDOWN_MS / 60000} 分钟内不再重试）`)
     }
   }
 
@@ -115,12 +119,17 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log }) {
     if (!client) return
     const reqId = frame?.headers?.req_id
 
+    // ⚠ 两条都必须挂 catch：这里是 setTimeout / 收消息回调里发起的，
+    //   没人接的拒绝 = unhandledRejection = 整个 DSH 进程被 Node 杀掉。
     if (text && reqId) {
-      void Promise.resolve(
+      fireAndForget(
         client.respond(reqId, { msgtype: 'markdown', markdown: { content: text } }),
-      ).catch((error) => log?.('debug', `占位文字没发出去：${error?.message || error}`))
+        '占位文字发送',
+        log,
+        'debug',
+      )
     }
-    if (image) void sendImage(client, chat, image)
+    if (image) fireAndForget(sendImage(client, chat, image), '占位图发送', log)
   }
 
   return {

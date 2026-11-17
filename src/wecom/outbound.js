@@ -16,6 +16,8 @@
 
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
+import { tryRequire } from '../core/deps.js'
+import { asLog } from '../core/safe.js'
 
 /** 单文件上限：草稿里定 20 MB，base64 后约 27 MB，还在 MCP 请求体承受范围内 */
 export const MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -24,18 +26,6 @@ const IMAGE_BUDGET = 1_400_000
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic'])
 
-
-/** 日志兼容：外面可能传 logger 对象（.info/.debug），也可能传 log(level, text) 函数 */
-function asLog(log) {
-  if (typeof log === 'function') return log
-  if (log && typeof log.info === 'function') {
-    return (level, text) => {
-      const fn = typeof log[level] === 'function' ? log[level] : log.info
-      try { fn.call(log, String(text ?? level)) } catch {}
-    }
-  }
-  return () => {}
-}
 
 export class SendFileError extends Error {
   constructor(message, code) {
@@ -83,7 +73,12 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
       const { fitImageToBudget, sniffImageMime, imageExt } = await import('./media.js')
       const mime = sniffImageMime(data)
       if (mime) {
-        const fit = await fitImageToBudget(data, mime, (n) => globalThis.__wecomRequire?.(n))
+        // 以前这里取的是 globalThis.__wecomRequire —— 全项目从来没给它赋过值，
+        // 于是 getSharp() 恒为 undefined，出站图片永远不压缩（入站方向传的是
+        // 真的 nodeRequire，所以只有出站不正常，很难发现）。
+        // 改用 deps.tryRequire：自己会依次找插件 node_modules、DSH profiles、cwd，
+        // 找不到返回 undefined，fitImageToBudget 那边会优雅降级（原样返回）。
+        const fit = await fitImageToBudget(data, mime, (n) => tryRequire(n))
         if (fit.data !== data) {
           data = fit.data
           const base = fileName.replace(/\.[^.]+$/, '')

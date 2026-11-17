@@ -17,6 +17,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import { loadConfig, saveConfig, publicConfig, merge, DATA_DIR } from './core/config.js'
 import { createLogger, recentLogs, redact } from './core/logger.js'
+import { fireAndForget } from './core/safe.js'
 import { record as recordActivity, recentEntries, chatStats, flushLog } from './core/activity.js'
 import { createVault, mcpRef } from './core/vault.js'
 import { checkQuota, addUsage, tickMinute, usageSnapshot, resetUsage, estimateTokens } from './core/quota.js'
@@ -180,11 +181,13 @@ export function apply(ctx) {
       // 从断开 → 已连接：断线期间的消息企微不会重发，拿水位自己去补。
       // 首次连接不补（那时还没有水位，也没什么可补的）。
       if (s.connected && !wasConnected && everConnected) {
-        void backfill.fillAll(s.reason || '重连', knownTargets()).catch((error) => log.debug(`补拉失败：${error.message}`))
+        fireAndForget(backfill.fillAll(s.reason || '重连', knownTargets()), '断线补拉', log, 'debug')
       }
       if (s.connected) everConnected = true
     })
-    c.onMessage((frame) => { void onInbound(frame) })
+    // ⚠ 必须吞掉拒绝：这是 websocket 的消息回调，外面的 try 管不到异步链。
+    //   这里漏一个 await 的失败，就是 unhandledRejection，Node 直接把 DSH 进程杀掉。
+    c.onMessage((frame) => { fireAndForget(onInbound(frame), '处理入站消息', log) })
     c.onEvent((frame) => { onEventCallback(frame) })
     return c
   }
@@ -259,15 +262,15 @@ export function apply(ctx) {
       if (!completed) {
         const detail = String(d.reason?.error?.message || d.reason?.failure?.message || '').replace(/\s+/g, ' ').slice(0, 180)
         log.warn(`${st.chat.chatId} 这一轮没正常结束（${d.reason?.kind || '?'}${detail ? '：' + redact(detail) : ''}）`)
-        void replyTo(frame, '这次没跑完，出错了。再试一次？')
+        fireAndForget(replyTo(frame, '这次没跑完，出错了。再试一次？'), '回复出错提示', log)
         return
       }
       if (isSilence(text)) {
         log.info(`${st.chat.chatId} 这一轮不说话`)
-        void replyTo(frame, '', true)
+        fireAndForget(replyTo(frame, '', true), '回复静默', log)
         return
       }
-      void replyTo(frame, clip(text))
+      fireAndForget(replyTo(frame, clip(text)), '回复消息', log)
     }
   }
 
@@ -372,8 +375,7 @@ export function apply(ctx) {
     // 群上下文：被 @ 时补一段。水位 = 上次被 @ 的时刻（群里未 @ 的消息企微根本不推，
     // 所以只能这样），补完把水位推到现在。
     if (chat.kind === 'group' && cfg.history.enabled) {
-      void backfill.fill(chat, sid, { reason: '这个群在你上次被叫之后又聊了这些' })
-        .catch((error) => log.debug(`补群历史失败：${error.message}`))
+      fireAndForget(backfill.fill(chat, sid, { reason: '这个群在你上次被叫之后又聊了这些' }), '补群历史', log, 'debug')
     }
     // 记下这一轮的状态：等 turn/end 再发
     turnState.set(sid, { chat, frame, text: '', lastTurn: -1, startedAt: Date.now(), said: merged })
@@ -492,12 +494,12 @@ export function apply(ctx) {
     if (message.msgtype === 'image') {
       await attachInboundImage(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
     } else if (message.msgtype === 'video') {
-      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
+      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
     } else if (message.msgtype === 'file') {
       if (groupFile) {
         message.text = '[文件] 群里发的文件我不收，需要我看的话私聊发我'
       } else {
-        await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
+        await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
       }
     }
 
@@ -571,7 +573,7 @@ export function apply(ctx) {
       return { ok: [], failed: [], reason: `异常：${error.message}`, dir: '', ffmpeg: '' }
     })
   let videoReport = null // 给面板/自检用：挂上了什么、为什么没挂上
-  void videoReady.then((r) => { videoReport = r })
+  fireAndForget(videoReady.then((r) => { videoReport = r }), '视频能力自检', log, 'debug')
 
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
@@ -653,10 +655,10 @@ export function apply(ctx) {
     const before = cfg
     cfg = saveConfig(next)
     if (before.enabled !== cfg.enabled || before.botId !== cfg.botId) {
-      void (async () => {
+      fireAndForget((async () => {
         await stopConnection()
         if (cfg.enabled) await startConnection()
-      })()
+      })(), '按配置重连', log)
     }
     return cfg
   }

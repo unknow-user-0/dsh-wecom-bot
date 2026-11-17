@@ -6,6 +6,8 @@
 //   2. 企微没有「正在输入」提示（caps.typing = false），用户会以为没收到
 //      → 收到第一条就先回一个占位（默认 emmm...），超过阈值还没处理完再说一句
 
+import { fireAndForget } from '../core/safe.js'
+
 /** 超过这个时间还没开始处理，先发一句「别急」 */
 const SLOW_NOTICE_MS = 8_000
 
@@ -75,10 +77,10 @@ export function createMerger({ log, onFlush, onPlaceholder }) {
     const delay = Math.min(waitSec * 1000, remainToMax)
 
     if (delay <= 0) {
-      void flush(key)
+      fireAndForget(flush(key), '合并处理', log)
       return
     }
-    entry.timer = setTimeout(() => { void flush(key) }, delay)
+    entry.timer = setTimeout(() => { fireAndForget(flush(key), '合并处理', log) }, delay)
     entry.timer.unref?.()
   }
 
