@@ -37,7 +37,7 @@ function load() {
   return { chats: {} }
 }
 
-function save(m) {
+function saveNow(m) {
   try {
     if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true })
     const tmp = WATER_FILE + '.tmp'
@@ -45,6 +45,16 @@ function save(m) {
     renameSync(tmp, WATER_FILE)
   } catch {}
 }
+
+/**
+ * 防抖写盘：touch() 每条消息都会调，而水位文件会随会话数线性变大
+ * （单会话 seen 上限 4000 条 ≈ 140 KB，十个会话就 1.4 MB）。
+ * 每条消息同步全量重写会卡在事件循环上，所以攒 500ms 合并写一次。
+ *
+ * 代价：进程崩溃时可能丢最后 500ms 的水位。那个后果是「下次多补几条」，
+ * 而补拉有 msgid 去重兜底，不会重复 —— 丢水位是安全方向，丢消息才不是。
+ */
+const SAVE_DEBOUNCE_MS = 500
 
 /**
  * @param {object} o
@@ -56,6 +66,25 @@ function save(m) {
 export function createBackfill({ log, mcpFor, appendOnly, getConfig }) {
   const state = load()
   let running = false
+  let saveTimer = null
+  let dirty = false
+
+  /** 立刻落盘（关停、补拉结束这类「必须写下去」的时刻用） */
+  function flush() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+    if (!dirty) return
+    dirty = false
+    saveNow(state)
+  }
+
+  /** 攒着写：500ms 内的多次改动合并成一次落盘 */
+  function save() {
+    dirty = true
+    if (saveTimer) return
+    saveTimer = setTimeout(() => { saveTimer = null; flush() }, SAVE_DEBOUNCE_MS)
+    // 别让这个定时器拖住进程退出（DSH 关停时不该等它）
+    if (typeof saveTimer.unref === 'function') saveTimer.unref()
+  }
 
   const entry = (key) => {
     if (!state.chats[key]) state.chats[key] = { at: 0, seen: [] }
@@ -71,7 +100,7 @@ export function createBackfill({ log, mcpFor, appendOnly, getConfig }) {
     const e = entry(key)
     e.at = Date.now()
     if (msgid) markSeen(key, msgid)
-    save(state)
+    save()
   }
 
   function markSeen(key, msgid) {
@@ -173,6 +202,7 @@ export function createBackfill({ log, mcpFor, appendOnly, getConfig }) {
     }
     for (const it of fresh) markSeen(key, it.msgid || it.msg_id || it.id)
     touch(chat, '')
+    flush() // 补拉是一次性的，别攒着 —— 补完就该让水位落定
     log.debug(`补了 ${added} 条（${chat.kind} ${chat.chatId}${truncated ? '，水位超 7 天已截断' : ''}）`)
     return {
       ok: true,
@@ -208,8 +238,9 @@ export function createBackfill({ log, mcpFor, appendOnly, getConfig }) {
       return { ok: true, added: total, message: `补了 ${total} 条` }
     } finally {
       running = false
+      flush()
     }
   }
 
-  return { touch, fill, fillAll, watermarkOf, hasSeen, file: WATER_FILE }
+  return { touch, fill, fillAll, watermarkOf, hasSeen, flush, file: WATER_FILE }
 }

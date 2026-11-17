@@ -423,6 +423,8 @@ export function apply(ctx) {
     appendOnly: (sid, text, source) => hub.appendOnly(sid, text, source),
     getConfig,
   })
+  // 插件卸载时把攒着的水位写下去，不然最后 500ms 的进度白丢
+  ctx.effect(() => () => { try { backfill.flush() } catch {} }, 'wecom-bot: 落盘水位')
 
   /** 已知会话 → [{ chat, sessionId }]，补拉时按这个清单走 */
   function knownTargets() {
