@@ -202,11 +202,119 @@ function getSharp(requireFn) {
   return sharpLib
 }
 
+/** 多于一页 = 动图（GIF / 动画 WebP） */
+async function isAnimated(sharp, buffer) {
+  try {
+    const meta = await sharp(buffer, { animated: true }).metadata()
+    return Number(meta.pages || 1) > 1
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 动图压缩：只缩尺寸 + 抽帧，始终输出 GIF，绝不转静图。
+ *
+ * 为什么要抽帧：GIF 不像 JPEG 那样有质量旋钮，缩边会重采样出更多颜色，
+ * 常常【越压越大】（实测 2.0 MB 缩到 0.7 倍变成 6.4 MB）。
+ * 真正的体积杠杆只有「帧数 × 像素数」两个。
+ *
+ * @returns {Promise<{data: Buffer, mimeType: string}|null>} null = 压不进预算
+ */
+async function fitAnimatedToBudget(sharp, buffer, mimeType) {
+  let meta
+  try {
+    meta = await sharp(buffer, { animated: true }).metadata()
+  } catch {
+    return null
+  }
+  const pages = Number(meta.pages || 1)
+  if (pages <= 1) return null
+  const delays = await readDelays(buffer, pages)
+
+  // 先缩边（保帧），再抽帧（保尺寸）。两步都试，取第一个进预算的。
+  const widthSteps = [1, 0.8, 0.66, 0.5, 0.4]
+  const frameSteps = [1, 2, 3, 4, 6, 8]
+
+  for (const fs of frameSteps) {
+    for (const ws of widthSteps) {
+      try {
+        const keep = pickFrames(pages, fs)
+        if (keep.length < 2) continue // 只剩 1 帧就不是动图了，别假装
+        const slices = []
+        for (const page of keep) {
+          slices.push(await sharp(buffer, { page, pages: 1 }).png().toBuffer())
+        }
+        const width = ws === 1 ? undefined : Math.max(48, Math.round((meta.width || 0) * ws))
+        let enc = sharp(slices, { join: { animated: true } })
+        if (width) enc = enc.resize({ width, withoutEnlargement: true })
+        // ⚠ 抽帧必须补偿延时，否则总时长被砍掉，动图播放快好几倍。
+        //   每帧延时要乘上被抽掉的倍数，让「总播放时长」保持不变。
+        const delaysOut = keep.map((p, idx) => {
+          const orig = delays[p] || 100
+          // 末帧要覆盖「原图最后一帧到结尾」的那一段，不能按 1 算，
+          // 否则总时长会比原图短一截（实测 30 帧 2400ms 会变成 2320ms）。
+          const next = idx + 1 < keep.length ? keep[idx + 1] : pages
+          const span = Math.max(1, next - p)
+          return Math.max(20, Math.round(orig * span))
+        })
+        const out = await enc.gif({
+          delay: delaysOut,
+          loop: 0,
+          effort: 7,
+          dither: 1,
+        }).toBuffer()
+        if (out.length <= IMAGE_FIT_TARGET && out.length < buffer.length) {
+          const check = await sharp(out, { animated: true }).metadata()
+          if (Number(check.pages || 1) === keep.length) {
+            return { data: out, mimeType: 'image/gif' }
+          }
+        }
+      } catch {}
+    }
+  }
+  return null
+}
+
+/** 读出每帧原始延时（毫秒），读不到就给 100ms */
+async function readDelays(buffer, pages) {
+  try {
+    const meta = await sharpLib(buffer, { animated: true }).metadata()
+    if (Array.isArray(meta.delay) && meta.delay.length) return meta.delay
+  } catch {}
+  return Array(pages).fill(100)
+}
+
+/** 按步长抽帧，索引均匀分布，尽量保住首尾帧 */
+function pickFrames(pages, step) {
+  if (step <= 1) return Array.from({ length: pages }, (_, i) => i)
+  const out = []
+  for (let i = 0; i < pages; i += step) out.push(i)
+  const last = pages - 1
+  if (out[out.length - 1] !== last && last > 0) {
+    // 末帧很可能是关键动作，补进来（若和倒数第二帧挨太近就不补）
+    if (last - out[out.length - 1] > 1) out.push(last)
+  }
+  return out
+}
+
 /** 用 sharp 逐级缩边 + 降质量，压到预算内；压不动就交回原图让上层提示 */
 export async function fitImageToBudget(buffer, mimeType, requireFn) {
   if (buffer.length <= IMAGE_FIT_TARGET) return { data: buffer, mimeType }
   const sharp = getSharp(requireFn)
   if (!sharp) return { data: buffer, mimeType }
+
+  // 动图单独走一条路：GIF 是有损缩放的，直接按静态图处理会把动画压没。
+  // 以前所有格式一律输出 jpeg，等于「GIF 一旦超预算就变静图」，
+  // 而且因为出站压缩长期失效（__wecomRequire 从未赋值），这个 bug 一直藏着。
+  if (await isAnimated(sharp, buffer)) {
+    const anim = await fitAnimatedToBudget(sharp, buffer, mimeType)
+    if (anim) return anim
+    // 压不动：原样交回。上层照发，企微那边可能因为太大拒收，
+    // 但那比「悄悄把动画换成一张静图」诚实 —— 用户以为发了动图。
+    return { data: buffer, mimeType }
+  }
+
   const plans = []
   for (const width of [2048, 1600, 1280, 1024, 800]) {
     for (const quality of [82, 72]) plans.push({ width, quality })
