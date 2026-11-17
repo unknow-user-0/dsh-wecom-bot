@@ -386,6 +386,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const TAB_KEYS = {
         connect: ['botId', 'botName', 'longTasks'],
         access: ['accessMode', 'allow', 'autoRegister', 'merge'],
+        // 不把 merge 列进来：准入页改了阈值的话，功能页也会跟着亮一个「有改动」，
+        // 而功能页上并没有对应控件 —— 假信号会让这个圆点变得不可信。
+        // 功能页自己的占位开关改完，底部保存栏照样会亮，漏个小圆点不影响什么。
         features: ['features', 'history'],
         quota: ['quota'],
         persona: ['persona'],
@@ -640,9 +643,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Field, { label: '群聊停顿阈值（秒）', tip: '0.5 ~ 10' },
               h('input', { className: 'wb-input', type: 'number', step: '0.5', min: '0.5', max: '10', value: draft.merge?.groupWaitSec ?? 5, onChange: (e) => setD('merge.groupWaitSec', Number(e.target.value)) })),
             h(Field, { label: '群聊最长等（秒）', tip: '1 ~ 60' },
-              h('input', { className: 'wb-input', type: 'number', min: '1', max: '60', value: draft.merge?.groupMaxSec ?? 15, onChange: (e) => setD('merge.groupMaxSec', Number(e.target.value)) })),
-            h(Field, { label: '等待时的占位话', tip: '第一条消息先回这个，让对方知道收到了' },
-              h('input', { className: 'wb-input', value: draft.merge?.placeholder || '', placeholder: 'emmm...', onChange: (e) => setD('merge.placeholder', e.target.value) })))))
+              h('input', { className: 'wb-input', type: 'number', min: '1', max: '60', value: draft.merge?.groupMaxSec ?? 15, onChange: (e) => setD('merge.groupMaxSec', Number(e.target.value)) }))),
+          h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
+            '「先回一句」的开关和文案在「功能」栏里。')))
     }
 
     // ---------------- 工作目录迁移 ----------------
@@ -786,12 +789,114 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
             '触发点两个：群里被 @、断线重连。补的时候先补最近的，一批塞不下就分几批，不会一次性把上下文撑爆。')),
 
+        h(Card, {
+          title: '收到消息先回一句',
+          hint: '企微没有「正在输入」提示，不吭声对方会以为没发出去。关掉就彻底安静，等模型想好了直接给答案。',
+        },
+          h('div', { className: 'wb-between' },
+            h('div', null,
+              h('div', null, '先回一句文字'),
+              h('div', { className: 'wb-dim wb-small' }, '开：收到就先回下面这句；关：不发文字')),
+            h(Switch, { on: draft.merge?.placeholderOn !== false, onChange: (v) => setD('merge.placeholderOn', v) })),
+          // 关着也留着输入框：先想好要说什么、再打开，比「打开→改字→关掉」顺。
+          h('div', { style: { marginTop: 12 } },
+            h(Field, { label: '回什么', tip: '留空就是默认的 emmm...；关着的时候这句不会发出去' },
+              h('input', {
+                className: 'wb-input', value: draft.merge?.placeholder ?? '', placeholder: 'emmm...',
+                onChange: (e) => setD('merge.placeholder', e.target.value),
+              }))),
+          h(PlaceholderImage, { toast, draft, setD, reload })),
+
         h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话，全都落在一个工作区里，侧栏能看到。' },
           h(WorkspaceMigrate, { toast, reload })),
 
         h(VideoLogin, { toast }),
         h(Asr, { toast }),
       )
+    }
+
+    // ---------------- 占位图（收到消息先回一张图） ----------------
+    // 为什么要有：有人觉得「emmm...」太机械，回个自家形象/招牌图更像活人。
+    // 为什么不能让用户填路径：浏览器里 input file 拿不到真实本地路径，
+    // 所以走「选文件 → 读成 base64 → 传给宿主存进插件数据目录」这条路。
+    function PlaceholderImage({ toast, draft, setD, reload }) {
+      const [st, setSt] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const fileRef = useRef(null)
+
+      const load = useCallback(async () => {
+        const r = await get('/placeholder/state')
+        if (r?.ok) setSt(r)
+      }, [])
+      useEffect(() => { void load() }, [load])
+
+      const pick = async (file) => {
+        if (!file) return
+        if (file.size > 8 * 1024 * 1024) { toast?.('图片超过 8 MB，换一张小点的'); return }
+        setBusy(true)
+        try {
+          const dataUrl = await new Promise((resolve, reject) => {
+            const fr = new FileReader()
+            fr.onload = () => resolve(String(fr.result || ''))
+            fr.onerror = () => reject(new Error('读不了这个文件'))
+            fr.readAsDataURL(file)
+          })
+          const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
+          const r = await post('/placeholder/image', { name: file.name, base64 })
+          if (r?.ok) {
+            toast?.('占位图已保存')
+            await load()
+            reload?.()
+          } else toast?.(r?.message || '保存失败')
+        } catch (e) {
+          toast?.(e.message || '保存失败')
+        } finally {
+          setBusy(false)
+          if (fileRef.current) fileRef.current.value = ''
+        }
+      }
+
+      const clear = async () => {
+        setBusy(true)
+        try {
+          const r = await post('/placeholder/clear', {})
+          if (r?.ok) { toast?.('已清掉占位图'); await load(); reload?.() } else toast?.(r?.message || '清不掉')
+        } finally { setBusy(false) }
+      }
+
+      const imageOn = draft.merge?.placeholderImageOn !== false
+      const has = Boolean(st?.image)
+
+      return h('div', { style: { marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.2))' } },
+        h('div', { className: 'wb-between' },
+          h('div', null,
+            h('div', null, '再回一张图'),
+            h('div', { className: 'wb-dim wb-small' },
+              has ? '文字和图都开就是都发；只开图就只发图' : '没人发图就是只发文字')),
+          h(Switch, { on: imageOn, onChange: (v) => setD('merge.placeholderImageOn', v) })),
+
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' } },
+          h('input', {
+            ref: fileRef, type: 'file', accept: 'image/*', style: { display: 'none' },
+            onChange: (e) => void pick(e.target.files?.[0]),
+          }),
+          h('button', {
+            className: 'wb-btn', disabled: busy,
+            onClick: () => fileRef.current?.click(),
+          }, busy ? '处理中…' : (has ? '换一张' : '从本地选图')),
+          has ? h('button', { className: 'wb-btn wb-btn-ghost', disabled: busy, onClick: () => void clear() }, '删掉') : null,
+          has ? h('span', { className: 'wb-dim wb-small' }, `${(st.bytes / 1024).toFixed(0)} KB`) : null),
+
+        // 没配 disk/mail/doc 之一的人：图存得住但发不出去，必须提前说，
+        // 否则他配完一圈以为好了，实际对方只收到 emmm...
+        st && st.hasUpload === false
+          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 8, color: 'var(--dsw-alias-warning, #b7791f)' } },
+            '发图要先配一个 disk / mail / doc 服务（企微只认 media_id，图得先上传换 id）。没配的话图发不出去，只会发文字。')
+          : null,
+        st?.lastImageError
+          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6, color: 'var(--dsw-alias-warning, #b7791f)' } },
+            '上次发图失败：' + st.lastImageError)
+          : null)
     }
 
     // ---------------- 视频站登录（抖音 / B站） ----------------

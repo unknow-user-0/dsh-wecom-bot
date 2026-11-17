@@ -41,7 +41,7 @@ const CONFIG = {
   allow: { users: ['wofL_hCgAAJ5l8Bm66pquN28rQ76vQWg', 'zhangsan'], groups: ['wrABC123'] },
   autoRegister: false,
   workspaceDir: 'C:\\Users\\Haha\\WeComBot\\chats',
-  merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15, placeholder: 'emmm...' },
+  merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15, placeholderOn: true, placeholder: 'emmm...' },
   longTasks: false,
   features: { browser: 'admin', memory: true, sendFileToUser: 'admin' },
   quota: { enabled: true, unit: 'million', globalDailyTokens: 50_000_000, perChatDailyTokens: 5_000_000, adminsUnlimited: true, burstPerMinute: 30 },

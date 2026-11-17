@@ -9,7 +9,7 @@
 //
 // ⚠ 安全默认：总开关关。不手动打开，一句都不会真的发到企微。
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs'
 import { join, dirname, basename, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -25,6 +25,7 @@ import { createMcpClient, MCP_SERVICES, validateMcpUrl } from './wecom/mcp.js'
 import { createHub, WORKSPACE_TITLE } from './chat/hub.js'
 import { checkAccess, autoRegister, deniedReply } from './chat/access.js'
 import { createMerger } from './chat/merge.js'
+import { createPlaceholder } from './chat/placeholder.js'
 import { createBackfill } from './chat/backfill.js'
 import { normalizeInbound, attachInboundImage, attachInboundFile } from './chat/inbound.js'
 import { listPersonas, readPersona, savePersona, deletePersona, personaText, rulesText } from './persona/personas.js'
@@ -309,14 +310,22 @@ export function apply(ctx) {
     return contextText()
   }
 
+  // ---------- 占位（收到消息先回一句：文字 / 图片 / 都发）----------
+  const placeholder = createPlaceholder({
+    getConfig,
+    getClient: () => client,
+    mcpFor,
+    log: logger.child('placeholder'),
+  })
+
+  // 发图要 media_id，media_id 只能从 disk / mail / doc 的 media_upload 换。
+  // 面板上要把这个说清楚：选了图但没配这三个服务之一，图是发不出去的。
+  const mcpUploadReady = () => ['disk', 'mail', 'doc'].some((s) => Boolean(serviceUrlOf(s)))
+
   // ---------- 收消息 ----------
   const merger = createMerger({
     log: logger.child('merge'),
-    onPlaceholder: (frame, text) => {
-      const reqId = frame?.headers?.req_id
-      if (!reqId) return
-      void client?.respond(reqId, { msgtype: 'markdown', markdown: { content: text } }).catch(() => {})
-    },
+    onPlaceholder: (frame, chat) => { placeholder.fire(frame, chat) },
     onFlush: (frame, items) => handleBatch(frame, items),
   })
 
@@ -948,6 +957,58 @@ export function apply(ctx) {
     } catch (error) {
       return { ok: false, message: error.message }
     }
+  })
+  route('/placeholder/image', async (req) => {
+    const body = await readBody(req)
+    // 面板选本地文件 → 读成 base64 传上来 → 存进插件数据目录。
+    // 为什么不让面板直接填路径：浏览器里拿不到真实本地路径（input file 只给假路径），
+    // 而且数据存在插件目录里，换机器/重装插件后配置里的路径不会指向一个不存在的文件。
+    const name = String(body.name || 'placeholder.png')
+    const b64 = String(body.base64 || '')
+    if (!b64) return { ok: false, message: '没收到图片内容' }
+    let buffer
+    try { buffer = Buffer.from(b64, 'base64') } catch { return { ok: false, message: '图片内容解不开' } }
+    if (!buffer.length) return { ok: false, message: '图片是空的' }
+    if (buffer.length > 8 * 1024 * 1024) return { ok: false, message: '图片超过 8 MB，换一张小点的' }
+    const ext = (name.match(/\.[A-Za-z0-9]+$/) || ['.png'])[0].toLowerCase()
+    if (!['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'].includes(ext)) {
+      return { ok: false, message: `不支持的图片格式：${ext}` }
+    }
+    const file = join(DATA_DIR, 'placeholder' + ext)
+    try {
+      mkdirSync(DATA_DIR, { recursive: true })
+      // 换格式时把旧的删掉，不然目录里会躺着一堆没人引用的图
+      for (const old of ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']) {
+        if (old !== ext) { try { rmSync(join(DATA_DIR, 'placeholder' + old), { force: true }) } catch {} }
+      }
+      writeFileSync(file, buffer)
+    } catch (error) {
+      return { ok: false, message: '存不下这张图：' + error.message }
+    }
+    cfg = saveConfig({ ...cfg, merge: { ...cfg.merge, placeholderImage: file, placeholderImageOn: true } })
+    return { ok: true, path: file, bytes: buffer.length, config: publicConfig(cfg) }
+  })
+  route('/placeholder/state', () => {
+    const path = cfg.merge.placeholderImage
+    let bytes = 0
+    try { if (path && existsSync(path)) bytes = statSync(path).size } catch {}
+    return {
+      ok: true,
+      image: path,
+      bytes,
+      lastImageError: placeholder.lastImageError,
+      hasUpload: Boolean(mcpUploadReady()),
+    }
+  })
+  route('/placeholder/clear', async () => {
+    // 只删插件自己存的那张（DATA_DIR 下的 placeholder.*），
+    // 配置里的路径万一被人手改成别处的文件，绝不能顺手删掉。
+    const old = cfg.merge.placeholderImage
+    if (old && dirname(old) === DATA_DIR && /^placeholder\./.test(basename(old))) {
+      try { rmSync(old, { force: true }) } catch {}
+    }
+    cfg = saveConfig({ ...cfg, merge: { ...cfg.merge, placeholderImage: '' } })
+    return { ok: true, config: publicConfig(cfg) }
   })
   route('/reset', async () => {
     const n = Object.keys(hub.sessionMap()).length

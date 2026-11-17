@@ -6,9 +6,20 @@
 //   2. 企微没有「正在输入」提示（caps.typing = false），用户会以为没收到
 //      → 收到第一条就先回一个占位（默认 emmm...），超过阈值还没处理完再说一句
 
-const DEFAULT_PLACEHOLDER = 'emmm...'
 /** 超过这个时间还没开始处理，先发一句「别急」 */
 const SLOW_NOTICE_MS = 8_000
+
+/**
+ * 要不要发占位。
+ * 文字和图片各有开关：只配了图的人用 placeholderOn=false 关掉文字，
+ * 但他仍然想收到图片占位 —— 所以两个都关才是「彻底安静」。
+ */
+function wantsPlaceholder(cfg) {
+  const m = cfg?.merge || {}
+  const textOn = m.placeholderOn !== false
+  const imageOn = m.placeholderImageOn !== false && Boolean(String(m.placeholderImage || '').trim())
+  return textOn || imageOn
+}
 
 export function createMerger({ log, onFlush, onPlaceholder }) {
   /** chatId → { items: [], timer, firstAt, lastAt, sentPlaceholder, slowTimer, lastFrame } */
@@ -42,11 +53,15 @@ export function createMerger({ log, onFlush, onPlaceholder }) {
     entry.lastAt = Date.now()
     entry.lastFrame = frame          // 只回最后一条的 req_id
 
-    // 第一条消息：占位
-    if (!entry.sentPlaceholder) {
+    // 第一条消息：占位（文字 / 图片 / 都发）
+    // 开关在面板「功能」栏。关掉就彻底不出声 —— 有人嫌「emmm...」多余，
+    // 也有人（群里）觉得没有它就像消息石沉大海。默认开。
+    //
+    // 这里只判断「要不要通知一声」，具体发什么由 src/chat/placeholder.js 决定：
+    // 文字和图片各有自己的开关，只配了图的用户不该因为 placeholderOn 没开就不出声。
+    if (!entry.sentPlaceholder && wantsPlaceholder(cfg)) {
       entry.sentPlaceholder = true
-      const ph = cfg.merge.placeholder || DEFAULT_PLACEHOLDER
-      try { onPlaceholder?.(frame, ph) } catch {}
+      try { onPlaceholder?.(frame, normalized.chat) } catch {}
       entry.slowTimer = setTimeout(() => {
         // 8 秒还没处理完 —— 再说一句（占位已经发过了，这里只记日志不重复发）
         log.debug(`合并等待已超 ${SLOW_NOTICE_MS / 1000} 秒，仍在攒消息`)
