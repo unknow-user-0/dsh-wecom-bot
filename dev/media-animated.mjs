@@ -14,7 +14,7 @@
 // 跑法：node dev/media-animated.mjs
 
 import { tryRequire } from '../src/core/deps.js'
-import { fitImageToBudget, imageExt } from '../src/wecom/media.js'
+import { fitImageToBudget, imageExt, describeImage, sniffImageMime } from '../src/wecom/media.js'
 
 const problems = []
 const check = (ok, name, extra = '') => {
@@ -100,6 +100,53 @@ const req = (n) => tryRequire(n)
   } else {
     console.log('⚠ 静态图没造到超预算，跳过该项')
   }
+}
+
+// ---- ⑤ describeImage：面板「选图预告」的数据源 ----
+// 这是用户在选完图那一刻唯一能看到的东西。它报错了，用户就会以为
+// 「我选的 30 帧表情包会原样发出去」，实际对面只看到 15 帧。
+{
+  const big = await makeAnimGif(700, 550, 30, 80)
+  if (big.length > BUDGET) {
+    const pv = await describeImage(big, sniffImageMime(big), req)
+    check(Boolean(pv), 'describeImage 有返回')
+    check(pv.pages === 30, '预告报出原始帧数', String(pv.pages))
+    check(pv.dropped === true, '预告知道会被抽帧')
+    check(pv.finalPages >= 2 && pv.finalPages < pv.pages, '预告报出抽完还剩几帧', `${pv.pages} → ${pv.finalPages}`)
+    check(pv.droppedFrames === pv.pages - pv.finalPages, '少掉的帧数算得对', String(pv.droppedFrames))
+    // 时长必须对得上，不然用户以为动图会变快
+    check(Math.abs(pv.finalDurationMs - pv.durationMs) < 120,
+      '预告里的总时长和原图一致（不会变快）', `${pv.durationMs}ms → ${pv.finalDurationMs}ms`)
+    check(pv.finalMime === 'image/gif', '预告里最终形态还是 GIF', pv.finalMime)
+    check(pv.fitsBudget === true, '预告说压进预算了')
+    check(typeof pv.note === 'string' && pv.note.length > 0, '有给人看的一句话说明', pv.note)
+  } else {
+    console.log('⚠ 大动图没造到超预算，跳过 describeImage 抽帧项')
+  }
+
+  // 小动图：不压缩，最终形态必须等于原图 ——
+  // 曾经这里漏赋值，导致面板把 8 帧显示成「→ 1 帧」，
+  // 用户以为动画被压没了，其实根本没动过。
+  const small = await makeAnimGif(200, 150, 8, 100)
+  const pv2 = await describeImage(small, sniffImageMime(small), req)
+  check(pv2.finalPages === pv2.pages, '小动图：最终帧数 == 原始帧数', `${pv2.pages} → ${pv2.finalPages}`)
+  check(pv2.finalDurationMs === pv2.durationMs, '小动图：最终时长 == 原始时长',
+    `${pv2.durationMs}ms → ${pv2.finalDurationMs}ms`)
+  check(pv2.dropped === false, '小动图：不会误报被抽帧')
+  check(pv2.finalBytes === pv2.bytes, '小动图：字节数不变（确实没重编码）')
+
+  // 静态图：不该被当成动图
+  const W = 800, H = 600
+  const raw = Buffer.alloc(W * H * 3)
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 37 + 11) % 256
+  const still = await sharp(raw, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer()
+  const pv3 = await describeImage(still, 'image/png', req)
+  check(pv3.animated === false && pv3.pages === 1, '静态图：预告按静图处理')
+  check(pv3.dropped === false, '静态图：不会误报抽帧')
+
+  // 不是图片：必须返回 null，让上层不显示预告而不是崩
+  const pv4 = await describeImage(Buffer.from('这不是图片'), 'image/png', req)
+  check(pv4 === null, '解不开的内容返回 null（不炸）')
 }
 
 if (problems.length) {

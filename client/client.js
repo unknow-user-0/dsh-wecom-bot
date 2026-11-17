@@ -844,7 +844,12 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           const base64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl
           const r = await post('/placeholder/image', { name: file.name, base64 })
           if (r?.ok) {
-            toast?.('占位图已保存')
+            // 顺手报一下「真发出去长什么样」。动图被抽帧这件事必须在选图时就看见，
+            // 否则等消息已经发到对面聊天窗了才发现帧数少一半。
+            const pv = r.preview
+            if (pv?.dropped) toast?.(`动图 ${pv.pages} 帧会抽成 ${pv.finalPages} 帧（播放速度不变）`)
+            else if (pv?.animated) toast?.(`动图 ${pv.pages} 帧，${(pv.durationMs / 1000).toFixed(1)} 秒，就这样发`)
+            else toast?.('占位图已保存')
             await load()
             reload?.()
           } else toast?.(r?.message || '保存失败')
@@ -886,6 +891,24 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           }, busy ? '处理中…' : (has ? '换一张' : '从本地选图')),
           has ? h('button', { className: 'wb-btn wb-btn-ghost', disabled: busy, onClick: () => void clear() }, '删掉') : null,
           has ? h('span', { className: 'wb-dim wb-small' }, `${(st.bytes / 1024).toFixed(0)} KB`) : null),
+
+        // 「真发出去长什么样」：动图会不会被抽帧、压不压得进预算，都在这里说清。
+        // 这是面板上唯一能提前发现「我选了 30 帧，对面只看到 15 帧」的地方。
+        st?.preview?.note
+          ? h('div', {
+            className: 'wb-dim wb-small',
+            style: {
+              marginTop: 8,
+              color: st.preview.fitsBudget ? undefined : 'var(--dsw-alias-warning, #b7791f)',
+            },
+          },
+            st.preview.dropped ? '✂ ' : '',
+            st.preview.note,
+            st.preview.dropped
+              ? h('span', { style: { opacity: 0.75 } },
+                `（${st.preview.width}×${st.preview.height}，${(st.preview.bytes / 1048576).toFixed(1)} MB → ${(st.preview.finalBytes / 1048576).toFixed(1)} MB）`)
+              : null)
+          : null,
 
         // 没配 disk/mail/doc 之一的人：图存得住但发不出去，必须提前说，
         // 否则他配完一圈以为好了，实际对方只收到 emmm...

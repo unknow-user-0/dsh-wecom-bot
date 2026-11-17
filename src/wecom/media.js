@@ -334,3 +334,94 @@ export async function fitImageToBudget(buffer, mimeType, requireFn) {
   }
   return { data: buffer, mimeType }
 }
+
+/**
+ * 预演：这张图真发出去会长什么样？
+ *
+ * 面板选完图就调一次，把「会不会被抽帧、抽到几帧、总时长还对不对、压没压进预算」
+ * 直接摆给用户看。不这么做的话，用户选了一张 30 帧的表情包，发出去变成 15 帧
+ * 才发现 —— 那时候已经在对面的聊天窗里了。
+ *
+ * @returns {Promise<{
+ *   bytes: number, width: number, height: number, animated: boolean, pages: number,
+ *   durationMs: number, finalBytes: number, finalPages: number, finalDurationMs: number,
+ *   finalWidth: number, finalMime: string, dropped: boolean, droppedFrames: number,
+ *   fitsBudget: boolean, note: string
+ * }|null>} null = 解不开（不是图片 / 没装 sharp）
+ */
+export async function describeImage(buffer, mimeType, requireFn) {
+  const sharp = getSharp(requireFn)
+  const base = {
+    bytes: buffer.length,
+    width: 0, height: 0, animated: false, pages: 1, durationMs: 0,
+    finalBytes: buffer.length, finalPages: 1, finalDurationMs: 0, finalWidth: 0,
+    finalMime: mimeType, dropped: false, droppedFrames: 0,
+    fitsBudget: buffer.length <= IMAGE_FIT_TARGET, note: '',
+  }
+  if (!sharp) {
+    base.note = '没装 sharp，发之前不会压缩（超预算的图可能被企微拒收）'
+    return base
+  }
+
+  let meta
+  try {
+    meta = await sharp(buffer, { animated: true }).metadata()
+  } catch {
+    return null
+  }
+  const pages = Number(meta.pages || 1)
+  const delays = pages > 1 ? await readDelays(buffer, pages) : []
+  const durationMs = delays.reduce((a, b) => a + (b || 0), 0)
+  Object.assign(base, {
+    width: meta.width || 0,
+    height: meta.pageHeight || meta.height || 0,
+    animated: pages > 1,
+    pages,
+    durationMs,
+  })
+
+  if (buffer.length <= IMAGE_FIT_TARGET) {
+    base.finalWidth = meta.width || 0
+    // 不压缩时「最终形态」就是原图本身，别漏赋值 —— 否则面板会显示成
+    // 「8 帧动图 → 1 帧」，用户以为动画没了，其实根本没动过。
+    base.finalPages = pages
+    base.finalDurationMs = durationMs
+    base.note = pages > 1
+      ? `动图 ${pages} 帧，${(durationMs / 1000).toFixed(1)} 秒，不用压`
+      : '大小在预算内，原样发'
+    return base
+  }
+
+  // 真压一遍看结果（这是用户最后真的会发出去的那个东西）
+  const fit = await fitImageToBudget(buffer, mimeType, requireFn)
+  let fm = null
+  try { fm = await sharp(fit.data, { animated: true }).metadata() } catch {}
+  const fPages = Number(fm?.pages || 1)
+  const fDelays = fPages > 1 ? await readDelays(fit.data, fPages) : []
+  const fDur = fDelays.reduce((a, b) => a + (b || 0), 0)
+
+  Object.assign(base, {
+    finalBytes: fit.data.length,
+    finalPages: fPages,
+    finalDurationMs: fDur,
+    finalWidth: fm?.width || meta.width || 0,
+    finalMime: fit.mimeType,
+    dropped: pages > 1 && fPages < pages,
+    droppedFrames: Math.max(0, pages - fPages),
+    fitsBudget: fit.data.length <= IMAGE_FIT_TARGET,
+  })
+
+  if (pages > 1 && fPages > 1) {
+    base.note = base.dropped
+      ? `动图 ${pages} 帧太大（${(buffer.length / 1048576).toFixed(1)} MB），会自动抽成 ${fPages} 帧，`
+        + `总时长还是 ${(fDur / 1000).toFixed(1)} 秒，播放速度不变`
+      : `动图 ${pages} 帧已经压进预算（${(fit.data.length / 1048576).toFixed(1)} MB），帧数没动`
+  } else if (pages > 1 && fPages <= 1) {
+    base.note = '⚠ 这张动图压不进预算，又没法安全抽帧，可能会被企微拒收'
+  } else if (base.fitsBudget) {
+    base.note = `会压缩到 ${(fit.data.length / 1048576).toFixed(1)} MB 再发`
+  } else {
+    base.note = '⚠ 压不进预算，可能会被企微拒收'
+  }
+  return base
+}

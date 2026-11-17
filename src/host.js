@@ -988,16 +988,40 @@ export function apply(ctx) {
       return { ok: false, message: '存不下这张图：' + error.message }
     }
     cfg = saveConfig({ ...cfg, merge: { ...cfg.merge, placeholderImage: file, placeholderImageOn: true } })
-    return { ok: true, path: file, bytes: buffer.length, config: publicConfig(cfg) }
+    // 选完图就告诉用户「真发出去会长什么样」。
+    // 不预演的话，30 帧的表情包压成 15 帧这事，要等消息已经发到对面才发现。
+    let preview = null
+    try {
+      const { describeImage, sniffImageMime } = await import('./wecom/media.js')
+      const mime = sniffImageMime(buffer) || ''
+      if (mime) preview = await describeImage(buffer, mime, nodeRequire)
+    } catch (error) {
+      log.debug(`占位图预演失败：${error.message}`)
+    }
+    return { ok: true, path: file, bytes: buffer.length, preview, config: publicConfig(cfg) }
   })
-  route('/placeholder/state', () => {
+  route('/placeholder/state', async () => {
     const path = cfg.merge.placeholderImage
     let bytes = 0
     try { if (path && existsSync(path)) bytes = statSync(path).size } catch {}
+    // 面板每次加载也要能看到「现在这张图真发出去长什么样」，
+    // 不然换了机器、或者图被别的地方改过，用户就不知道当前状态了。
+    let preview = null
+    if (path && bytes) {
+      try {
+        const { describeImage, sniffImageMime } = await import('./wecom/media.js')
+        const buf = readFileSync(path)
+        const mime = sniffImageMime(buf) || ''
+        if (mime) preview = await describeImage(buf, mime, nodeRequire)
+      } catch (error) {
+        log.debug(`占位图状态预演失败：${error.message}`)
+      }
+    }
     return {
       ok: true,
       image: path,
       bytes,
+      preview,
       lastImageError: placeholder.lastImageError,
       hasUpload: Boolean(mcpUploadReady()),
     }
