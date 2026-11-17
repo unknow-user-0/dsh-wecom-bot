@@ -50,6 +50,19 @@ async function makeAnimGif(W, H, N, delayMs) {
 
 const req = (n) => tryRequire(n)
 
+/** 纯随机噪点的多帧 GIF：调色板压不动，用来制造「怎么压都超预算」的样本 */
+async function makeNoiseGif(W, H, N) {
+  const frames = []
+  for (let f = 0; f < N; f++) {
+    const raw = Buffer.alloc(W * H * 3)
+    for (let i = 0; i < raw.length; i++) raw[i] = (Math.random() * 256) | 0
+    frames.push(await sharp(raw, { raw: { width: W, height: H, channels: 3 } }).png().toBuffer())
+  }
+  return sharp(frames, { join: { animated: true } })
+    .gif({ delay: Array(N).fill(40), loop: 0, effort: 1 })
+    .toBuffer()
+}
+
 // ---- ① 超预算大动图：保住动画，压进预算 ----
 {
   const gif = await makeAnimGif(700, 550, 30, 80)
@@ -147,6 +160,36 @@ const req = (n) => tryRequire(n)
   // 不是图片：必须返回 null，让上层不显示预告而不是崩
   const pv4 = await describeImage(Buffer.from('这不是图片'), 'image/png', req)
   check(pv4 === null, '解不开的内容返回 null（不炸）')
+}
+
+// ---- ⑥ 压到极限也放不进预算：必须明说「不发」----
+// 注意：这里**不能**靠「造一张足够大的图」来触发 overBudget。
+// 试过一堆巨图（20~76 MB、2~6 帧、纯噪点），最后都能压进预算
+// （缩到 0.2 宽 + 128 色足够狠），硬造到压不动反而让这个用例长期空转、等于没测。
+// 真正能让它压不动的只有一种情况：时间不够。所以直接把预算压到 1ms，
+// 稳定地走到「超时 → null → overBudget」这条路径。
+// 用户场景：随手拿了张 4K 录屏转的 GIF，几百帧，面板必须当场拦住，
+// 而不是让他配好、等真来消息时才发现对面什么都没收到。
+{
+  const huge = await makeNoiseGif(560, 440, 24)
+  if (huge.length <= BUDGET) {
+    console.log('⚠ 造出来的图不够大，检查 makeNoiseGif')
+  } else {
+    const fit = await fitImageToBudget(huge, sniffImageMime(huge), req, { budgetMs: 1 })
+    check(fit.overBudget === true, '时间不够时，压缩层明确报 overBudget',
+      `${(huge.length / 1048576).toFixed(2)}MB → ${(fit.data.length / 1048576).toFixed(2)}MB`)
+    check(fit.data === huge, 'overBudget 时原样交回（不悄悄换成静图）',
+      fit.mimeType)
+
+    const pv = await describeImage(huge, sniffImageMime(huge), req, { budgetMs: 1 })
+    check(pv.sendable === false, '预告说这张图发不出去')
+    check(pv.fitsBudget === false, '预告里 fitsBudget 也是 false')
+    // 文案要点：说「不会发」，不能说「可能被拒」
+    // —— 说了「可能」用户就会去试，试完对面没收到，他还以为自己网不好。
+    check(/不会发/.test(pv.note), '说明里明确讲「不会发」', pv.note)
+    check(!/可能被拒|可能被拒收/.test(pv.note), '说明里不能写「可能被拒」')
+    check(/换一张|缩小/.test(pv.note), '说明里给出了出路（换图/缩小）')
+  }
 }
 
 if (problems.length) {

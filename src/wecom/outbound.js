@@ -69,6 +69,10 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
   // 图片先压：企微图片有自己的体积限制，手机直出的十几 MB 原图会被拒
   let data = buffer
   if (type === 'image') {
+    // 「压不动」要拒绝发送，这个决定不能被下面那个 catch 吞掉 ——
+    // 那个 catch 的本意是「压缩这一步出错就跳过，原图照发」，
+    // 两者是完全相反的结论，所以用变量把它带出 try。
+    let tooLarge = null
     try {
       const { fitImageToBudget, sniffImageMime, imageExt } = await import('./media.js')
       const mime = sniffImageMime(data)
@@ -79,7 +83,12 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
         // 改用 deps.tryRequire：自己会依次找插件 node_modules、DSH profiles、cwd，
         // 找不到返回 undefined，fitImageToBudget 那边会优雅降级（原样返回）。
         const fit = await fitImageToBudget(data, mime, (n) => tryRequire(n))
-        if (fit.data !== data) {
+        if (fit.overBudget) {
+          // 压到极限还是超预算：拒绝，别传上去赌企微会不会收。
+          // 赌输的代价是「用户以为配好了图，对面永远收不到」，而他无从察觉。
+          tooLarge = `这张图压到极限还有 ${(fit.data.length / 1048576).toFixed(1)} MB，超过企微图片上限。`
+            + '换一张小点的，或者先把它缩小再传。'
+        } else if (fit.data !== data) {
           data = fit.data
           const base = fileName.replace(/\.[^.]+$/, '')
           fileName = base + imageExt(fit.mimeType)
@@ -89,6 +98,7 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
     } catch (error) {
       log('debug', `图片压缩跳过：${error.message}`)
     }
+    if (tooLarge) throw new SendFileError(tooLarge, 'image_too_large')
   }
 
   const payload = {

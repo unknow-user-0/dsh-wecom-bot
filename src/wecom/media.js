@@ -193,6 +193,13 @@ export function looksLikeVideo(buffer) {
 
 /** 引擎单图预算 2 MiB，手机直出照片动辄十几 MB，不压就会被整张丢掉 */
 const IMAGE_FIT_TARGET = 1_400_000
+/**
+ * 动图压缩的总时间预算。
+ * 用户选了张表情包，面板上转几十秒他只会以为程序卡死了。
+ * 与其精确预测「这张图到底能不能压下去」，不如给个上限 —— 超过就当压不动，
+ * 明说发不出去，比让人干等更诚实。
+ */
+const COMPRESS_BUDGET_MS = 8000
 let sharpLib
 let sharpProbed = false
 function getSharp(requireFn) {
@@ -213,15 +220,16 @@ async function isAnimated(sharp, buffer) {
 }
 
 /**
- * 动图压缩：只缩尺寸 + 抽帧，始终输出 GIF，绝不转静图。
+ * 动图压缩：只缩尺寸 + 抽帧 + 降色，始终输出 GIF，绝不转静图。
  *
  * 为什么要抽帧：GIF 不像 JPEG 那样有质量旋钮，缩边会重采样出更多颜色，
  * 常常【越压越大】（实测 2.0 MB 缩到 0.7 倍变成 6.4 MB）。
- * 真正的体积杠杆只有「帧数 × 像素数」两个。
+ * 真正的体积杠杆只有「帧数 × 像素数 × 颜色数」。
  *
+ * @param {number} [budgetMsOverride] 只给测试用：把时间预算压到极小以走到超时分支
  * @returns {Promise<{data: Buffer, mimeType: string}|null>} null = 压不进预算
  */
-async function fitAnimatedToBudget(sharp, buffer, mimeType) {
+async function fitAnimatedToBudget(sharp, buffer, mimeType, budgetMsOverride) {
   let meta
   try {
     meta = await sharp(buffer, { animated: true }).metadata()
@@ -232,45 +240,152 @@ async function fitAnimatedToBudget(sharp, buffer, mimeType) {
   if (pages <= 1) return null
   const delays = await readDelays(buffer, pages)
 
-  // 先缩边（保帧），再抽帧（保尺寸）。两步都试，取第一个进预算的。
-  const widthSteps = [1, 0.8, 0.66, 0.5, 0.4]
-  const frameSteps = [1, 2, 3, 4, 6, 8]
+  // 为什么这个顺序（先高质量、失败再降）：
+  //   用户选表情包是为了「会动」，两帧一闪而过就不算动图了。
+  //   所以质量优先 —— 先试保留最多帧数、最大尺寸的组合，压不下才逐档往下退。
+  //   反过来（先试最便宜的组合）永远能秒答，但答案质量是最差的，方向错了。
+  //
+  // 为什么不是「一档一档往下试」：encode 耗时正比于「像素 × 帧数」，
+  //   40 帧的图从头试到尾要累加编码七八次，面板上转 30 秒用户以为卡死。
+  //   GIF 体积基本正比于「像素数 × 帧数」，所以按目标体积反推，
+  //   第一枪就该落在「刚好能进预算」的那一档附近，而不是从最大那档慢慢降。
+  // 下界一路给到 0.2：20~25 MB 的巨图（4K 录屏转的 GIF）实测必须缩到 0.3 才进预算，
+  //   原来最细只到 0.4，于是「明明能压」被判成压不动 —— 下限本身就是个误杀源。
+  const widthSteps = [1, 0.8, 0.66, 0.5, 0.4, 0.3, 0.25, 0.2]
+  // 牺牲顺序（按用户痛感从低到高）：
+  //   1. 降色：GIF 本来就只有 256 色，降到 128 肉眼几乎看不出来，体积却直接减半
+  //      （实测同一张图 256 色 2.57MB → 128 色 1.27MB）。这是最划算的一刀。
+  //   2. 缩边：掉分辨率，肉眼一眼能看出糊。
+  //   3. 抽帧：丢的是「会动」这件事本身，表情包的命根子，最后才动。
+  // 所以内层是「同一分辨率下先把颜色降下来，实在不行才缩边」，
+  // 而不是反过来 —— 保住大尺寸的 128 色，比缩一半的 256 色好看得多。
+  const colourSteps = [256, 128]
+  const efforts = [3, 7]
+  // 帧数下限：少于 4 帧就不算动图了，用户要的「会动」直接没了 ——
+  // 与其交一个几乎不动的 GIF，不如判定压缩失败、明说发不出去。
+  // 但不能超过原帧数：3 帧的图保 3 帧是正常的（不抽帧），
+  // 写成绝对 4 会把「任何抽帧档」全排掉，连不抽帧那一档也一起死了。
+  const minKeep = Math.min(pages, 4)
+  // roughPages = 按抽帧估算「大概剩几帧能放进预算」。
+  // 这是第一枪的位置，不是否决线 —— 它没考虑缩边，所以可能偏保守，
+  // 因此附近几档也要试。
+  const roughPages = Math.floor((pages * IMAGE_FIT_TARGET * 0.92) / buffer.length)
+  const guessSteps = []
+  for (const p of [roughPages, Math.ceil(roughPages * 1.4), Math.floor(roughPages * 0.7), Math.floor(roughPages * 0.5)]) {
+    const s = Math.max(2, Math.ceil(pages / Math.max(1, p)))
+    if (s > 1 && !guessSteps.includes(s)) guessSteps.push(s)
+  }
+  // guessSteps 按帧数从多到少排（步长小的排前面 = 帧数多的优先 = 质量高优先）
+  guessSteps.sort((a, b) => a - b)
+  // 兜底：估算失准时把常用的几档也排进去，仍然保持「帧多的在前」
+  const frameSteps = [...guessSteps, 1, 2, 3, 4, 6, 8].filter((v, i, a) => a.indexOf(v) === i)
 
-  for (const fs of frameSteps) {
-    for (const ws of widthSteps) {
+  // 给定「这一档要保留多少帧」，估算需要缩到多大才能进预算。
+  //
+  // 为什么要估：帧数少但像素大的图（比如 1600×1200 只有 3 帧），抽帧一点用没有 ——
+  //   能降体积的只有缩边。以前内层固定从 1.0 开始一档档往下降，
+  //   这种图要白编码三次才轮到 0.5，8 秒兜底线一到就判「压不动」，
+  //   明明 0.4 能进，却被误杀成 overBudget，用户看到的是「这张图发不出去」。
+  //
+  // 依据：GIF 体积基本正比于「像素数 × 帧数」。
+  //   所以先算出原图平均每帧每像素占多少字节，再反推目标面积。
+  const area = (meta.width || 1) * ((meta.pageHeight || 0) || Math.round((meta.height || 1) / Math.max(1, pages)))
+  const bytesPerFramePixel = buffer.length / Math.max(1, pages * area)
+  const widthStepsFor = (keepLen) => {
+    const targetArea = (IMAGE_FIT_TARGET * 0.9) / Math.max(1, keepLen * bytesPerFramePixel)
+    const est = Math.sqrt(targetArea / area)
+    // 估算只决定「从哪一档开始退」，不决定「能不能压」——
+    // 所以从估算值往上留一点余量，能保住画质就先保住画质。
+    const start = Math.min(1, Math.max(widthSteps[widthSteps.length - 1], est * 1.15))
+    const out = widthSteps.filter((ws) => ws <= start + 1e-6)
+    return out.length ? out : [widthSteps[widthSteps.length - 1]]
+  }
+
+  // 同一组抽帧只解码一次 —— 相邻组合常常共享 fs，解码是最贵的一步
+  const sliceCache = new Map()
+  const slicesFor = async (fs) => {
+    if (sliceCache.has(fs)) return sliceCache.get(fs)
+    const keep = pickFrames(pages, fs)
+    const slices = []
+    for (const page of keep) {
+      slices.push(await sharp(buffer, { page, pages: 1 }).png().toBuffer())
+    }
+    const out = { keep, slices }
+    sliceCache.set(fs, out)
+    return out
+  }
+
+  // 兜底线：用户站在面板前等一张图，几秒没动静就会以为程序死了。
+  // 但「几秒」不能一刀切 —— 面板上传本来就限 8 MB，超过 8 MB 的图只可能来自
+  // 手动改配置或 sendFile，那些场合没人在盯着面板刷新。所以：
+  //   ≤ 8 MB：8 秒，保证面板永远有及时反馈；
+  //   > 8 MB：按工作量放大到最多 30 秒，否则 20~70 MB 的巨图会被
+  //           「时间不够」误判成「压不动」，而它们其实缩到 0.3 就能进预算。
+  // 工作量 ≈ 帧数 × 单帧像素数，与实测解码+编码耗时基本成正比。
+  const workload = pages * ((meta.width || 1) * ((meta.pageHeight || 0) || Math.round((meta.height || 1) / Math.max(1, pages))))
+  const budgetMs = budgetMsOverride || (buffer.length <= 8 * 1048576
+    ? COMPRESS_BUDGET_MS
+    : Math.min(30000, COMPRESS_BUDGET_MS + Math.round(workload / 2_000_000) * 500))
+  const deadline = Date.now() + budgetMs
+
+  for (const effort of efforts) {
+    for (const fs of frameSteps) {
+      if (Date.now() > deadline) return null
+      let decoded
       try {
-        const keep = pickFrames(pages, fs)
-        if (keep.length < 2) continue // 只剩 1 帧就不是动图了，别假装
-        const slices = []
-        for (const page of keep) {
-          slices.push(await sharp(buffer, { page, pages: 1 }).png().toBuffer())
-        }
+        decoded = await slicesFor(fs)
+      } catch {
+        continue
+      }
+      const { keep, slices } = decoded
+      if (keep.length < 2) continue // 只剩 1 帧就不是动图了，别假装
+      // 帧本来就少的图别抽帧：3 帧抽成 2 帧只省三分之一，动画却明显卡了。
+      // 这种图的体积杠杆全在缩边上，抽帧那一档纯属白花编码时间
+      // （实测 1600×1200 只有 3 帧时，白试一轮就撞上 8 秒兜底线，
+      // 明明缩到 0.4 只剩 0.40 MB 却被判成「压不动」）。
+      if (keep.length < minKeep) continue
+
+      // ⚠ 抽帧必须补偿延时，否则总时长被砍掉，动图播放快好几倍。
+      //   每帧延时要乘上被抽掉的倍数，让「总播放时长」保持不变。
+      const delaysOut = keep.map((p, idx) => {
+        const orig = delays[p] || 100
+        // 末帧要覆盖「原图最后一帧到结尾」的那一段，不能按 1 算，
+        // 否则总时长会比原图短一截（实测 30 帧 2400ms 会变成 2320ms）。
+        const next = idx + 1 < keep.length ? keep[idx + 1] : pages
+        const span = Math.max(1, next - p)
+        return Math.max(20, Math.round(orig * span))
+      })
+
+      for (const ws of widthStepsFor(keep.length)) {
+        if (Date.now() > deadline) return null
         const width = ws === 1 ? undefined : Math.max(48, Math.round((meta.width || 0) * ws))
-        let enc = sharp(slices, { join: { animated: true } })
-        if (width) enc = enc.resize({ width, withoutEnlargement: true })
-        // ⚠ 抽帧必须补偿延时，否则总时长被砍掉，动图播放快好几倍。
-        //   每帧延时要乘上被抽掉的倍数，让「总播放时长」保持不变。
-        const delaysOut = keep.map((p, idx) => {
-          const orig = delays[p] || 100
-          // 末帧要覆盖「原图最后一帧到结尾」的那一段，不能按 1 算，
-          // 否则总时长会比原图短一截（实测 30 帧 2400ms 会变成 2320ms）。
-          const next = idx + 1 < keep.length ? keep[idx + 1] : pages
-          const span = Math.max(1, next - p)
-          return Math.max(20, Math.round(orig * span))
-        })
-        const out = await enc.gif({
-          delay: delaysOut,
-          loop: 0,
-          effort: 7,
-          dither: 1,
-        }).toBuffer()
-        if (out.length <= IMAGE_FIT_TARGET && out.length < buffer.length) {
-          const check = await sharp(out, { animated: true }).metadata()
-          if (Number(check.pages || 1) === keep.length) {
-            return { data: out, mimeType: 'image/gif' }
-          }
+        // 同一档分辨率下先试 256 色（无损观感），不行再降到 128 色。
+        // 降色比缩边划算得多，所以它在缩边循环里面，不单独占一层。
+        for (const colours of colourSteps) {
+          if (Date.now() > deadline) return null
+          try {
+            // ⚠ pages: -1 不能省。只写 join:{animated:true} 时，只要后面接 resize()，
+            //   sharp 就只处理第一页 —— 输出变成单帧 GIF，帧数检查不通过、白编码一轮，
+            //   于是「所有需要缩边的图」全被判成压不动（实测 1600×1200 三帧缩到 640
+            //   只剩 1 帧，加上 pages:-1 才是 3 帧）。这个坑几乎把整个动图压缩废掉。
+            let enc = sharp(slices, { join: { animated: true }, pages: -1 })
+            if (width) enc = enc.resize({ width, withoutEnlargement: true })
+            const out = await enc.gif({
+              delay: delaysOut,
+              loop: 0,
+              effort,
+              dither: colours === 256 ? 1 : 0,
+              colours,
+            }).toBuffer()
+            if (out.length <= IMAGE_FIT_TARGET && out.length < buffer.length) {
+              const check = await sharp(out, { animated: true }).metadata()
+              if (Number(check.pages || 1) === keep.length) {
+                return { data: out, mimeType: 'image/gif' }
+              }
+            }
+          } catch {}
         }
-      } catch {}
+      }
     }
   }
   return null
@@ -298,21 +413,31 @@ function pickFrames(pages, step) {
   return out
 }
 
-/** 用 sharp 逐级缩边 + 降质量，压到预算内；压不动就交回原图让上层提示 */
-export async function fitImageToBudget(buffer, mimeType, requireFn) {
+/**
+ * 用 sharp 逐级缩边 + 降质量，压到预算内。
+ *
+ * @param {number} [budgetMsOverride] 只给测试用：把时间预算压到极小以走到超时分支
+ * @returns {Promise<{data: Buffer, mimeType: string, overBudget?: true}>}
+ *   `overBudget: true` = 所有办法都试过了还是超标。上层据此**拒绝发送**，
+ *   而不是硬着头皮发一张大概率被企微拒掉的图 —— 那种失败对用户是隐形的：
+ *   他只看到对方没反应，不知道自己配了个永远发不出去的图。
+ */
+export async function fitImageToBudget(buffer, mimeType, requireFn, opts = {}) {
   if (buffer.length <= IMAGE_FIT_TARGET) return { data: buffer, mimeType }
   const sharp = getSharp(requireFn)
+  // 没装 sharp 就没法压。这不算「压不动」——是我们缺工具，
+  // 不该拿这个当理由拒绝发送（用户那张图本身可能企微是收得下的）。
   if (!sharp) return { data: buffer, mimeType }
 
   // 动图单独走一条路：GIF 是有损缩放的，直接按静态图处理会把动画压没。
   // 以前所有格式一律输出 jpeg，等于「GIF 一旦超预算就变静图」，
   // 而且因为出站压缩长期失效（__wecomRequire 从未赋值），这个 bug 一直藏着。
   if (await isAnimated(sharp, buffer)) {
-    const anim = await fitAnimatedToBudget(sharp, buffer, mimeType)
+    const anim = await fitAnimatedToBudget(sharp, buffer, mimeType, opts.budgetMs)
     if (anim) return anim
-    // 压不动：原样交回。上层照发，企微那边可能因为太大拒收，
-    // 但那比「悄悄把动画换成一张静图」诚实 —— 用户以为发了动图。
-    return { data: buffer, mimeType }
+    // 缩边抽帧降色都试过了还是超：认了。
+    // 不悄悄转静图（用户以为发了动图），也不再原样硬发（几乎必被拒）。
+    return { data: buffer, mimeType, overBudget: true }
   }
 
   const plans = []
@@ -332,7 +457,7 @@ export async function fitImageToBudget(buffer, mimeType, requireFn) {
       }
     } catch {}
   }
-  return { data: buffer, mimeType }
+  return { data: buffer, mimeType, overBudget: true }
 }
 
 /**
@@ -349,14 +474,14 @@ export async function fitImageToBudget(buffer, mimeType, requireFn) {
  *   fitsBudget: boolean, note: string
  * }|null>} null = 解不开（不是图片 / 没装 sharp）
  */
-export async function describeImage(buffer, mimeType, requireFn) {
+export async function describeImage(buffer, mimeType, requireFn, opts = {}) {
   const sharp = getSharp(requireFn)
   const base = {
     bytes: buffer.length,
     width: 0, height: 0, animated: false, pages: 1, durationMs: 0,
     finalBytes: buffer.length, finalPages: 1, finalDurationMs: 0, finalWidth: 0,
     finalMime: mimeType, dropped: false, droppedFrames: 0,
-    fitsBudget: buffer.length <= IMAGE_FIT_TARGET, note: '',
+    fitsBudget: buffer.length <= IMAGE_FIT_TARGET, sendable: true, note: '',
   }
   if (!sharp) {
     base.note = '没装 sharp，发之前不会压缩（超预算的图可能被企微拒收）'
@@ -393,7 +518,7 @@ export async function describeImage(buffer, mimeType, requireFn) {
   }
 
   // 真压一遍看结果（这是用户最后真的会发出去的那个东西）
-  const fit = await fitImageToBudget(buffer, mimeType, requireFn)
+  const fit = await fitImageToBudget(buffer, mimeType, requireFn, opts)
   let fm = null
   try { fm = await sharp(fit.data, { animated: true }).metadata() } catch {}
   const fPages = Number(fm?.pages || 1)
@@ -408,20 +533,27 @@ export async function describeImage(buffer, mimeType, requireFn) {
     finalMime: fit.mimeType,
     dropped: pages > 1 && fPages < pages,
     droppedFrames: Math.max(0, pages - fPages),
-    fitsBudget: fit.data.length <= IMAGE_FIT_TARGET,
+    // 发不发得出去，看压缩层自己的结论；没装 sharp 时它不会报 overBudget，
+    // 那就退回「按字节数猜」——毕竟那种情况我们确实不知道。
+    fitsBudget: fit.overBudget ? false : fit.data.length <= IMAGE_FIT_TARGET,
+    sendable: !fit.overBudget,
   })
 
-  if (pages > 1 && fPages > 1) {
+  if (!base.sendable) {
+    // 缩边到 40%、抽帧抽到 1/8 还是超标 —— 这张图就是发不出去。
+    // 明确说「不会发」，别写成「可能被拒」：说了「可能」用户就会去试，
+    // 试完对面什么都没收到，他还以为是自己网不好。
+    base.note = `这张图压到极限还有 ${(base.finalBytes / 1048576).toFixed(1)} MB，超过企微上限，`
+      + '占位时不会发这张图（文字照发）。换一张小点的，或者把它缩小后再传。'
+  } else if (pages > 1 && fPages > 1) {
     base.note = base.dropped
       ? `动图 ${pages} 帧太大（${(buffer.length / 1048576).toFixed(1)} MB），会自动抽成 ${fPages} 帧，`
         + `总时长还是 ${(fDur / 1000).toFixed(1)} 秒，播放速度不变`
       : `动图 ${pages} 帧已经压进预算（${(fit.data.length / 1048576).toFixed(1)} MB），帧数没动`
   } else if (pages > 1 && fPages <= 1) {
-    base.note = '⚠ 这张动图压不进预算，又没法安全抽帧，可能会被企微拒收'
-  } else if (base.fitsBudget) {
-    base.note = `会压缩到 ${(fit.data.length / 1048576).toFixed(1)} MB 再发`
+    base.note = '⚠ 这张动图压不进预算，又没法安全抽帧'
   } else {
-    base.note = '⚠ 压不进预算，可能会被企微拒收'
+    base.note = `会压缩到 ${(fit.data.length / 1048576).toFixed(1)} MB 再发`
   }
   return base
 }

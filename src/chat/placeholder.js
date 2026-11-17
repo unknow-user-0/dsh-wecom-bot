@@ -101,6 +101,8 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw })
     } catch (error) {
       failReason = messageOf(error)
       failUntil = Date.now() + FAIL_COOLDOWN_MS
+      // 图太大被拒不属于「配置坏了」，用户改张图就好，所以提示要给出路。
+      // 冷却照样设 —— 每条消息都去读一遍大图、压一遍、再失败一次，没必要。
       log('warn', `占位图没发出去：${failReason}（${FAIL_COOLDOWN_MS / 60000} 分钟内不再重试）`)
     }
   }

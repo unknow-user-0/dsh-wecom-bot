@@ -977,6 +977,25 @@ export function apply(ctx) {
       return { ok: false, message: `不支持的图片格式：${ext}` }
     }
     const file = join(DATA_DIR, 'placeholder' + ext)
+
+    // 先预演，再落盘。顺序很重要：一张压到极限还超标的图，
+    // 存下来只会让用户以为配好了、其实永远发不出去 —— 不如当场拒收，
+    // 并说清原因和出路。所以「能不能发」必须在写文件之前就判定完。
+    let preview = null
+    try {
+      const { describeImage, sniffImageMime } = await import('./wecom/media.js')
+      const mime = sniffImageMime(buffer) || ''
+      if (!mime) return { ok: false, message: '这不是一张能识别的图片（坏了或者扩展名不对）' }
+      preview = await describeImage(buffer, mime, nodeRequire)
+    } catch (error) {
+      // 预演本身出错不该挡住上传（可能只是 sharp 没装好）。
+      // 这种情况预览为空，面板就不显示那句说明，图照常存。
+      log.debug(`占位图预演失败：${error.message}`)
+    }
+    if (preview && preview.sendable === false) {
+      return { ok: false, message: preview.note, preview }
+    }
+
     try {
       mkdirSync(DATA_DIR, { recursive: true })
       // 换格式时把旧的删掉，不然目录里会躺着一堆没人引用的图
@@ -988,16 +1007,6 @@ export function apply(ctx) {
       return { ok: false, message: '存不下这张图：' + error.message }
     }
     cfg = saveConfig({ ...cfg, merge: { ...cfg.merge, placeholderImage: file, placeholderImageOn: true } })
-    // 选完图就告诉用户「真发出去会长什么样」。
-    // 不预演的话，30 帧的表情包压成 15 帧这事，要等消息已经发到对面才发现。
-    let preview = null
-    try {
-      const { describeImage, sniffImageMime } = await import('./wecom/media.js')
-      const mime = sniffImageMime(buffer) || ''
-      if (mime) preview = await describeImage(buffer, mime, nodeRequire)
-    } catch (error) {
-      log.debug(`占位图预演失败：${error.message}`)
-    }
     return { ok: true, path: file, bytes: buffer.length, preview, config: publicConfig(cfg) }
   })
   route('/placeholder/state', async () => {
