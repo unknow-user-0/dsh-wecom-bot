@@ -385,7 +385,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       ]
       const TAB_KEYS = {
         connect: ['botId', 'botName', 'longTasks'],
-        access: ['accessMode', 'allow', 'autoRegister', 'merge', 'workspaceDir'],
+        access: ['accessMode', 'allow', 'autoRegister', 'merge'],
         features: ['features', 'history'],
         quota: ['quota'],
         persona: ['persona'],
@@ -642,9 +642,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Field, { label: '群聊最长等（秒）', tip: '1 ~ 60' },
               h('input', { className: 'wb-input', type: 'number', min: '1', max: '60', value: draft.merge?.groupMaxSec ?? 15, onChange: (e) => setD('merge.groupMaxSec', Number(e.target.value)) })),
             h(Field, { label: '等待时的占位话', tip: '第一条消息先回这个，让对方知道收到了' },
-              h('input', { className: 'wb-input', value: draft.merge?.placeholder || '', placeholder: 'emmm...', onChange: (e) => setD('merge.placeholder', e.target.value) })))),
-        h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话，全都落在一个工作区里，侧栏能看到。' },
-          h(WorkspaceMigrate, { toast, reload })))
+              h('input', { className: 'wb-input', value: draft.merge?.placeholder || '', placeholder: 'emmm...', onChange: (e) => setD('merge.placeholder', e.target.value) })))))
     }
 
     // ---------------- 工作目录迁移 ----------------
@@ -740,7 +738,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 功能 ----------------
-    function Features({ draft, setD, toast }) {
+    function Features({ draft, setD, toast, reload }) {
       // 这里只留「确实需要选」的东西。看视频、收文件、MCP 写、真人身份发消息都不再是开关 ——
       // 它们的边界由「是不是管理员」「是私聊还是群」决定，不靠用户记得去打开。
       const browserMode = draft.features?.browser || 'admin'
@@ -787,6 +785,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Switch, { on: !!draft.history?.enabled, onChange: (v) => setD('history.enabled', v) })),
           h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
             '触发点两个：群里被 @、断线重连。补的时候先补最近的，一批塞不下就分几批，不会一次性把上下文撑爆。')),
+
+        h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话，全都落在一个工作区里，侧栏能看到。' },
+          h(WorkspaceMigrate, { toast, reload })),
 
         h(VideoLogin, { toast }),
         h(Asr, { toast }),
