@@ -106,11 +106,9 @@ export function buildTools(d) {
     execute: async ({ to, kind, text }, exec) => {
       const chat = chatOfSession?.(exec?.sessionId)
       if (!chat) return { ok: false, message: '这个会话不是企微来源。' }
-      const c = cfg()
       if (!chat.isAdmin) return { ok: false, message: '只有管理员能用这个。' }
-      if (!c.features.mcpSendAsMe) {
-        return { ok: false, message: '这个能力默认关着，让管理员在「功能」里打开「以我的身份发消息」。' }
-      }
+      // 没有开关了：能不能以真人身份发，只看「是不是管理员」+ 下面那道口令。
+      // 多管理员场景下，每个管理员用自己的 MCP 凭据（mcpFor 收到 userId 会取他配的那套）。
       // 闸门：管理员这一轮必须真的说过「用我的身份 / 以我的名义」。
       // 不做二次确认（老大定的），但这句暗号必须在原话里出现过。
       const said = String(d.lastText?.(exec?.sessionId) || '')
@@ -338,7 +336,8 @@ export function buildTools(d) {
   // 全展开进工具列表会把系统提示撑爆（每个工具几百字描述），所以只给两个动词：
   //   list —— 先看这个服务有哪些工具、要什么参数
   //   call —— 真调一次
-  // 写操作（建/改/删/发）单独一道闸：面板里「MCP 写操作」开着才放行。
+  // 写操作（建/改/删/发）没有开关了：管理员本来就有权限。
+  // 但「写之前先说一声」的措辞要留着 —— 删文档、发邮件这类动作，确认一次比事后道歉便宜。
   const WRITE_TOOL_RE = /(^|_)(create|add|update|modify|delete|remove|send|submit|finish|cancel|upload|rename|move|copy)(_|$)/i
   tools.push(defineTool({
     name: 'wecom_mcp',
@@ -350,7 +349,7 @@ export function buildTools(d) {
       '  · 邮件、群消息历史都只能查「当前时刻前后 7 天」，超了会报错，不是没有数据。',
       '  · 微盘和文档都**没有删除**工具，只能建、改、搜、传。',
       '  · 通讯录只能按关键词搜，不能全量罗列成员。',
-      '写操作（建/改/删/发）需要管理员在面板里打开「MCP 写操作」，没开会明确拒绝。',
+      '写操作（建/改/删/发）随时可以调，但**动手前先跟对方说一句要做什么** —— 删文档、发邮件这类动作，确认一次比事后道歉便宜。',
     ].join('\n'),
     slow: '我查一下。',
     properties: {
@@ -384,12 +383,8 @@ export function buildTools(d) {
       }
       if (action !== 'call') return { ok: false, message: 'action 只能是 list 或 call。' }
       if (!tool) return { ok: false, message: '要调哪个工具？先 action=list 看一眼。' }
-      if (WRITE_TOOL_RE.test(tool) && !cfg().features.mcpWrite) {
-        return {
-          ok: false,
-          message: `「${tool}」是写操作，管理员还没在面板里打开「MCP 写操作」。先问一句，别自己动手。`,
-        }
-      }
+      // 没有「MCP 写操作」开关了：管理员本来就有权限，写之前先问一句是人情不是硬闸。
+      // 多管理员：mcpFor 用 chat.userId 取的是这个人自己配的服务，互相看不到对方的。
       try {
         const r = await mc.call(tool, args && typeof args === 'object' ? args : {})
         return { ok: true, message: JSON.stringify(r).slice(0, 4000) }

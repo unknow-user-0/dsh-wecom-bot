@@ -386,7 +386,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const TAB_KEYS = {
         connect: ['botId', 'botName', 'longTasks'],
         access: ['accessMode', 'allow', 'autoRegister', 'merge', 'workspaceDir'],
-        features: ['features', 'history', 'resync'],
+        features: ['features', 'history'],
         quota: ['quota'],
         persona: ['persona'],
       }
@@ -741,42 +741,53 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 
     // ---------------- 功能 ----------------
     function Features({ draft, setD, toast }) {
-      const F = [
-        ['browser', '浏览器操作', '登录态要自己导 cookie。只给主人档（群和陌生人拿不到）。'],
-        ['video', '看视频', '依赖 dsh-video-storyboard，还要 ffmpeg。缺了会自动降级，不报错。'],
-        ['files', '文件收发', '走 MCP 的 media_upload + message_aibot_send。单次 20 MB 以内，更大的走微盘。'],
-        ['memory', '记忆', '四层记忆（人 / 场景 / 技能 / 公共），跨场景召回会标来源。'],
-        ['mcpWrite', 'MCP 写操作', '文档/待办/日程/微盘的增改。关了就只能读。'],
-        ['mcpSendAsMe', '以管理员身份发消息', '署名是真人不是机器人。只在管理员明确说了「用我的身份」时才该开。'],
-      ]
+      // 这里只留「确实需要选」的东西。看视频、收文件、MCP 写、真人身份发消息都不再是开关 ——
+      // 它们的边界由「是不是管理员」「是私聊还是群」决定，不靠用户记得去打开。
+      const browserMode = draft.features?.browser || 'admin'
       return h('div', { className: 'wb-page' },
-        h(Card, { title: '能力开关', hint: '开源默认：浏览器 / 视频 / 文件文档 开；MCP 写 / 真人身份发消息 关。' },
-          F.map(([k, name, desc]) => h('div', { key: k, className: 'wb-between' },
-            h('div', null, h('div', null, name), h('div', { className: 'wb-dim wb-small' }, desc)),
-            h(Switch, { on: !!draft.features?.[k], onChange: (v) => setD('features.' + k, v) })))),
+        h(Card, {
+          title: '浏览器操作',
+          hint: '机器人可以开一个独立浏览器去操作网页（内网系统、网店后台这类）。群聊永远不给。',
+        },
+          h('div', { className: 'wb-seg' },
+            h('button', {
+              type: 'button', className: cx(browserMode === 'admin' && 'on'),
+              onClick: () => setD('features.browser', 'admin'),
+            }, '管理员可用'),
+            h('button', {
+              type: 'button', className: cx(browserMode === 'all' && 'on'),
+              onClick: () => setD('features.browser', 'all'),
+            }, '所有私聊可用'),
+            h('button', {
+              type: 'button', className: cx(browserMode === 'off' && 'on'),
+              onClick: () => setD('features.browser', 'off'),
+            }, '关掉')),
+          h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
+            browserMode === 'all'
+              ? '所有私聊的人都能让它开浏览器 —— 这台电脑上的登录态也跟着对所有人可见。想清楚再开。'
+              : browserMode === 'off'
+                ? '谁都开不了。已经开着的浏览器不会自己关，去「连接」里点断开。'
+                : '只有管理员的私聊能用。默认就是这个。')),
+
         h(Card, { title: '谁能让机器人发文件', hint: '默认只给管理员。开放模式下建议保持默认，不然谁都能让它往群里甩文件。' },
           h('div', { className: 'wb-seg' },
             h('button', { type: 'button', className: cx(draft.features?.sendFileToUser === 'admin' && 'on'), onClick: () => setD('features.sendFileToUser', 'admin') }, '只有管理员'),
-            h('button', { type: 'button', className: cx(draft.features?.sendFileToUser === 'all' && 'on'), onClick: () => setD('features.sendFileToUser', 'all') }, '所有人'))),
-        h(Card, { title: '群上下文补齐', hint: '被 @ 时用 MCP 拉这个群最近的消息，先在本地会话里垫一段，再回答。企微只让查最近 7 天。' },
+            h('button', { type: 'button', className: cx(draft.features?.sendFileToUser === 'all' && 'on'), onClick: () => setD('features.sendFileToUser', 'all') }, '所有私聊')),
+          h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
+            '收文件是另一回事：私聊发来的都收，群里发的不收（这条不设开关）。')),
+
+        h(Card, {
+          title: '上下文补齐',
+          hint: '拿「上次见到消息的时间」当水位，把中间漏掉的全部补回来。群里只在水位处被 @ 时补（企微不推未 @ 的消息）。',
+        },
           h('div', { className: 'wb-between' },
-            h('div', null, h('div', null, '启用'), h('div', { className: 'wb-dim wb-small' }, '要配了 MCP 的 msg 服务才有效')),
+            h('div', null,
+              h('div', null, '启用'),
+              h('div', { className: 'wb-dim wb-small' }, '要配了 MCP 的 msg 服务才有效；关掉则两个触发点都不补')),
             h(Switch, { on: !!draft.history?.enabled, onChange: (v) => setD('history.enabled', v) })),
-          h('div', { className: 'wb-between' },
-            h('div', null, h('div', null, '第一次被 @ 就补'), h('div', { className: 'wb-dim wb-small' }, '不然第一次 @ 时它什么上下文都没有')),
-            h(Switch, { on: !!draft.history?.syncOnFirstMention, onChange: (v) => setD('history.syncOnFirstMention', v) })),
-          h('div', { className: 'wb-grid', style: { marginTop: 12 } },
-            h(Field, { label: '两次同步最短间隔（分钟）', tip: '0 = 不限制' },
-              h('input', { className: 'wb-input', type: 'number', min: '0', value: draft.history?.syncIntervalMin ?? 0, onChange: (e) => setD('history.syncIntervalMin', Number(e.target.value)) })),
-            h(Field, { label: '一次最多补几条', tip: '1 ~ 200' },
-              h('input', { className: 'wb-input', type: 'number', min: '1', max: '200', value: draft.history?.maxMessages ?? 30, onChange: (e) => setD('history.maxMessages', Number(e.target.value)) })))),
-        h(Card, { title: '断线补拉', hint: '掉线期间企微不会缓存消息给你。重连后只能靠 MCP 把这期间的消息读回来。' },
-          h('div', { className: 'wb-between' },
-            h('div', null, h('div', null, '重连后补拉'), h('div', { className: 'wb-dim wb-small' }, '只补最近几分钟，太久了补回来也没意义')),
-            h(Switch, { on: !!draft.resync?.enabled, onChange: (v) => setD('resync.enabled', v) })),
-          h('div', { className: 'wb-grid', style: { marginTop: 12 } },
-            h(Field, { label: '最多往回补多久（分钟）', tip: '5 ~ 8640' },
-              h('input', { className: 'wb-input', type: 'number', min: '5', max: '8640', value: draft.resync?.maxMinutes ?? 120, onChange: (e) => setD('resync.maxMinutes', Number(e.target.value)) })))),
+          h('div', { className: 'wb-dim wb-small', style: { marginTop: 8 } },
+            '触发点两个：群里被 @、断线重连。补的时候先补最近的，一批塞不下就分几批，不会一次性把上下文撑爆。')),
+
         h(VideoLogin, { toast }),
         h(Asr, { toast }),
       )
@@ -1028,7 +1039,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 记忆 ----------------
-    function Memory({ toast }) {
+    function Memory({ draft, setD, toast }) {
       const [rows, setRows] = useState([])
       const [stats, setStats] = useState(null)
       const [q, setQ] = useState('')
@@ -1039,6 +1050,13 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       useEffect(() => { void load('') }, [load])
       const del = async (id) => { const r = await post('/memory/delete', { id }); if (r?.ok) { toast('删了', 'ok'); void load(q) } }
       return h('div', { className: 'wb-page' },
+        // 记忆开关搬到这里了 —— 开关和它控制的东西放同一页，不用在「功能」和「记忆」之间来回跳
+        h(Card, { title: '记忆', hint: '关掉之后不再记新的，也不召回旧的。已经记下来的东西不会删。' },
+          h('div', { className: 'wb-between' },
+            h('div', null,
+              h('div', null, '启用记忆'),
+              h('div', { className: 'wb-dim wb-small' }, '四层记忆：人 / 场景 / 技能 / 公共')),
+            h(Switch, { on: !!draft.features?.memory, onChange: (v) => setD('features.memory', v) }))),
         h(Card, { title: '记忆库', hint: '四层：人（跨会话）/ 场景（这个群或这个私聊）/ 技能（所有人共享）/ 公共（全局事实）。过时的不会被删，只是不再被召回。' },
           stats ? h('div', { className: 'wb-row', style: { marginBottom: 12 } },
             h('span', { className: 'wb-tag brand' }, '共 ' + stats.total + ' 条'),

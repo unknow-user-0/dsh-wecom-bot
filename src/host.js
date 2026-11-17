@@ -25,6 +25,7 @@ import { createMcpClient, MCP_SERVICES, validateMcpUrl } from './wecom/mcp.js'
 import { createHub, WORKSPACE_TITLE } from './chat/hub.js'
 import { checkAccess, autoRegister, deniedReply } from './chat/access.js'
 import { createMerger } from './chat/merge.js'
+import { createBackfill } from './chat/backfill.js'
 import { normalizeInbound, attachInboundImage, attachInboundFile } from './chat/inbound.js'
 import { listPersonas, readPersona, savePersona, deletePersona, personaText, rulesText } from './persona/personas.js'
 import * as memory from './memory/store.js'
@@ -173,10 +174,10 @@ export function apply(ctx) {
       const wasConnected = connState.connected
       connState = { ...connState, ...s }
       log.info(`连接状态：${s.connected ? '已连接' : '断开'}${s.reason ? '（' + s.reason + '）' : ''}`)
-      // 从断开 → 已连接：断线期间的消息企微不会重发，自己去补。
-      // 首次连接不补（那时还没有会话记录，也没什么可补的）。
+      // 从断开 → 已连接：断线期间的消息企微不会重发，拿水位自己去补。
+      // 首次连接不补（那时还没有水位，也没什么可补的）。
       if (s.connected && !wasConnected && everConnected) {
-        void resyncAll(s.reason || '重连').catch(() => {})
+        void backfill.fillAll(s.reason || '重连', knownTargets()).catch((error) => log.debug(`补拉失败：${error.message}`))
       }
       if (s.connected) everConnected = true
     })
@@ -357,11 +358,12 @@ export function apply(ctx) {
     // 不等的话 prompt 先跑起来，模型看到的是没有 video_* 的工具清单。
     try { await mountTools(info.agent, chat, info.level, sid) } catch (error) { log.debug(`挂工具失败：${error.message}`) }
 
-    // 群上下文：被 @ 时先用 MCP 补一段最近消息（只在打开的群、且距上次同步够久时）
-    if (chat.kind === 'group' && cfg.history.enabled && cfg.history.syncOnFirstMention) {
-      void syncGroupHistory(chat, sid).catch((error) => log.debug(`补群历史失败：${error.message}`))
+    // 群上下文：被 @ 时补一段。水位 = 上次被 @ 的时刻（群里未 @ 的消息企微根本不推，
+    // 所以只能这样），补完把水位推到现在。
+    if (chat.kind === 'group' && cfg.history.enabled) {
+      void backfill.fill(chat, sid, { reason: '这个群在你上次被叫之后又聊了这些' })
+        .catch((error) => log.debug(`补群历史失败：${error.message}`))
     }
-
     // 记下这一轮的状态：等 turn/end 再发
     turnState.set(sid, { chat, frame, text: '', lastTurn: -1, startedAt: Date.now(), said: merged })
 
@@ -412,87 +414,40 @@ export function apply(ctx) {
     }
   }
 
-  // ---------- 群上下文补齐 ----------
-  const lastSync = new Map() // chatId → 毫秒
-  async function syncGroupHistory(chat, sid) {
-    if (!cfg.history.enabled) return
-    const mc = await mcpFor('msg')
-    if (!mc) return
-    const now = Date.now()
-    const prev = lastSync.get(chat.chatId) || 0
-    const minGap = Math.max(0, Number(cfg.history.syncIntervalMin) || 0) * 60_000
-    const from = prev && now - prev < 6 * 86400e3 ? prev : now - Math.min(3600_000, 30 * 60_000)
-    if (prev && minGap && now - prev < minGap) return
-    lastSync.set(chat.chatId, now)
+  // ---------- 上下文补齐（一套水位，两个触发点）----------
+  // 群上下文补齐和断线补拉本来是两坨代码、两套配置，做的是同一件事。
+  // 现在只有一份实现（src/chat/backfill.js），触发点两个：群里被 @、重连成功。
+  const backfill = createBackfill({
+    log: logger.child('backfill'),
+    mcpFor,
+    appendOnly: (sid, text, source) => hub.appendOnly(sid, text, source),
+    getConfig,
+  })
 
-    const { localTime, safeWindow } = await import('./wecom/mcp.js')
-    const w = safeWindow(6 * 86400e3, now)
-    const begin = Math.max(from, now - 6 * 86400e3) < now - 6 * 86400e3 ? w.begin : localTime(from)
-    const r = await mc.call('chat_messages_list', { chat_id: chat.chatId, begin_time: begin, end_time: w.end })
-    const list = Array.isArray(r.message_list) ? r.message_list : (Array.isArray(r.messages) ? r.messages : [])
-    if (!list.length) return
-    const cap = Math.min(200, Number(cfg.history.maxMessages) || 30)
-    const lines = list.slice(-cap).map((it) => {
-      const who = it.user_name || it.userid || '某人'
-      const when = String(it.send_time || '').slice(11, 16)
-      const body = it.text?.content ?? `[${it.msg_type || '消息'}]`
-      return `${who}（${when}）：${body}`
-    })
-    await hub.appendOnly(sid, `【这个群在你上次看之后又聊了这些】\n${lines.join('\n')}`, 'wecom-history')
-    log.debug(`补了 ${lines.length} 条群历史（${chat.chatId}）`)
-  }
-
-  // ---------- 断线补拉 ----------
-  // 断线期间的 @ 消息企微不会重发，只能重连后自己去 MCP 拉回来。
-  // 只补「已经有会话的群/私聊」，且只 append 不 followup —— 不惊动模型，下一轮它自己就看到了。
-  let resyncing = false
-  async function resyncAll(reason) {
-    if (!cfg.resync?.enabled || resyncing) return
-    const mins = Math.max(5, Math.min(6 * 24 * 60, Number(cfg.resync.maxMinutes) || 120))
+  /** 已知会话 → [{ chat, sessionId }]，补拉时按这个清单走 */
+  function knownTargets() {
     const map = hub.sessionMap() || {}
-    const targets = Object.entries(map).map(([key, v]) => ({ key, ...v })).filter((v) => v.sessionId)
-    if (!targets.length) return
-    const mc = await mcpFor('msg')
-    if (!mc) {
-      log.debug('断线补拉跳过：还没配 MCP 的 msg 服务')
-      return
+    const out = []
+    for (const [key, v] of Object.entries(map)) {
+      if (!v?.sessionId) continue
+      // key 形如 wecom:group:xxx / wecom:dm:xxx；映射里还存了 title / userId / groupId
+      const parts = String(key).split(':')
+      const kind = parts[1] === 'group' ? 'group' : 'dm'
+      const chatId = v.groupId || (kind === 'dm' ? v.userId : '') || parts.slice(2).join(':')
+      if (!chatId) continue
+      out.push({
+        chat: {
+          kind,
+          chatId,
+          userId: kind === 'dm' ? (v.userId || chatId) : '',
+          groupName: kind === 'group' ? (v.title || '') : '',
+        },
+        sessionId: v.sessionId,
+      })
     }
-    resyncing = true
-    const now = Date.now()
-    let total = 0
-    try {
-      const { localTime, safeWindow } = await import('./wecom/mcp.js')
-      const w = safeWindow(6 * 86400e3, now)
-      const begin = localTime(now - mins * 60_000)
-      for (const t of targets) {
-        const isGroup = String(t.key).includes(':group:') || Boolean(t.groupId)
-        const chatId = isGroup ? (t.groupId || String(t.key).split(':').pop()) : (t.userId || String(t.key).split(':').pop())
-        if (!chatId) continue
-        try {
-          const r = await mc.call('chat_messages_list', {
-            chat_id: chatId,
-            begin_time: begin < w.begin ? w.begin : begin,
-            end_time: w.end,
-          })
-          const list = Array.isArray(r.message_list) ? r.message_list : (Array.isArray(r.messages) ? r.messages : [])
-          if (!list.length) continue
-          const lines = list.slice(-100).map((it) => {
-            const who = it.user_name || it.userid || '某人'
-            const when = String(it.send_time || '').slice(11, 16)
-            const body = it.text?.content ?? `[${it.msg_type || '消息'}]`
-            return `${who}（${when}）：${body}`
-          })
-          await hub.appendOnly(t.sessionId, `【断线期间这里还聊了这些（${reason || '重连补拉'}）】\n${lines.join('\n')}`, 'wecom-history')
-          total += lines.length
-        } catch (error) {
-          log.debug(`补拉失败（${chatId}）：${error.message}`)
-        }
-      }
-      if (total) log.info(`断线补拉完成：${total} 条，覆盖 ${targets.length} 个会话`)
-    } finally {
-      resyncing = false
-    }
+    return out
   }
+
 
   // ---------- 入站主流程 ----------
   async function onInbound(frame) {
@@ -503,13 +458,9 @@ export function apply(ctx) {
     }
     const { chat } = message
 
-    // 附件先取（图片走 magic 校验解密，文件走严格 PKCS#7）
-    if (message.msgtype === 'image') {
-      await attachInboundImage(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
-    } else if (message.msgtype === 'file' || message.msgtype === 'video') {
-      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
-    }
-
+    // 先鉴权再下附件。
+    // 为什么要换顺序：以前是先下载解密再查白名单，开放模式下任何陌生人都能甩个
+    // 20MB 文件触发下载和落盘。改成先判权限，没权限的连内容都不碰。
     const access = checkAccess(cfg, chat)
     if (!access.allowed) {
       log.info(`拦下一条（${access.reason}）：${chat.kind} ${chat.chatId} / ${chat.userId}`)
@@ -518,11 +469,30 @@ export function apply(ctx) {
       return
     }
 
+    // 附件：图片所有会话都收；视频所有会话都收；普通文件只收私聊。
+    // 群里的文件不接（老大定的）—— 群文件多是共享资料，收下来既占地方又容易跑偏。
+    const groupFile = chat.kind === 'group' && message.msgtype === 'file'
+    if (message.msgtype === 'image') {
+      await attachInboundImage(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
+    } else if (message.msgtype === 'video') {
+      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
+    } else if (message.msgtype === 'file') {
+      if (groupFile) {
+        message.text = '[文件] 群里发的文件我不收，需要我看的话私聊发我'
+      } else {
+        await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
+      }
+    }
+
     const added = autoRegister(cfg, chat)
     if (added) {
       saveConfig(cfg)
       log.info(`开放模式自动登记：${added.kind} ${added.name || added.id}`)
     }
+
+    // 水位：私聊收到任何消息都推进（机器人看得见）；群只有被 @ 时才推进
+    // —— 群里没 @ 的消息企微不推，写进去也只是把水位往前挪，反而漏补。
+    if (chat.kind === 'dm') backfill.touch(chat, message.msgid)
 
     merger.push(frame, message, { config: cfg })
   }
@@ -580,24 +550,31 @@ export function apply(ctx) {
 
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
-  async function toolsFor(level) {
+  async function toolsFor(level, chat) {
     const video = await videoReady
-    // 文件/微盘/画图 归「收发文件」这一个总闸管（默认开，老大定的）
+    // 浏览器操作是三档：admin（只有管理员私聊）/ all（管理员 + 所有私聊）/ off。
+    // 群聊永远不给 —— 一个群成员不该能操纵主人电脑上的浏览器，这不是配置项。
+    const browserMode = cfg.features.browser
+    const canBrowser = browserMode !== 'off'
+      && (level === 'owner' || (browserMode === 'all' && chat?.kind === 'dm'))
+    // 文件/微盘/画图 只给管理员私聊：这几样能碰本机磁盘。
+    // 收文件另说（私聊收、群不收，在 onInbound 里按会话类型挡）。
     const fileish = (t) => /file|disk|draw/.test(t.name)
     if (level === 'owner') {
-      const list = [...wecomTools].filter((t) => cfg.features.files || !fileish(t))
-      if (cfg.features.browser) list.push(...browserTools)
-      if (cfg.features.video) list.push(...video.ok)
+      const list = [...wecomTools]
+      if (canBrowser) list.push(...browserTools)
+      list.push(...video.ok)
       return list
     }
-    // social（群聊 / 非管理员私聊）：只能发消息、读本会话历史、记点东西、看视频、查企微原生能力。
-    // 没有文件、没有微盘、没有浏览器、没有画图。
-    const list = wecomTools.filter((t) => !/file|disk|draw/.test(t.name))
-    if (cfg.features.video) list.push(...video.ok)
+    // social（群聊 / 非管理员私聊）：只能发消息、读本会话历史、记点东西、看视频。
+    // 没有文件、没有微盘、没有画图。
+    const list = wecomTools.filter((t) => !fileish(t))
+    if (canBrowser) list.push(...browserTools)
+    list.push(...video.ok)
     return list
   }
   async function mountTools(agent, chat, level, sid) {
-    const list = await toolsFor(level)
+    const list = await toolsFor(level, chat)
     const key = list.map((t) => t.name).sort().join(',') + '|' + level
     const prev = mounted.get(sid)
     if (prev && prev.agent === agent && prev.key === key) return

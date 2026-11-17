@@ -22,7 +22,7 @@ export function buildBrowserTools(d) {
   const bm = () => getBrowser()
 
   async function ready() {
-    if (!cfg().features?.browser) throw new Error('网页操作能力没开（管理员在面板里打开「网页操作」）')
+    if (!cfg().features?.browser || cfg().features.browser === 'off') throw new Error('网页操作能力没开（管理员在面板里打开「浏览器操作」）')
     const m = bm()
     if (!m) throw new Error('浏览器没初始化')
     const r = await m.ensure()

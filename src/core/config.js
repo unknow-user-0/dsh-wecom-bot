@@ -46,15 +46,14 @@ export const DEFAULTS = {
   },
   longTasks: true,         // 管理员私聊额外挂 jobs + schedule
 
-  // ---- 能力开关（开源默认）----
+  // ---- 能力档位 ----
+  // 这里只留「确实需要选」的东西。其余能力（看视频、收文件、MCP 写、真人身份发消息）
+  // 都不设开关：它们的边界由「是不是管理员」「是私聊还是群」决定，不靠用户记得去打开。
   features: {
-    browser: true,         // 浏览器操作（CDP）：默认开
-    video: true,           // 看视频（dsh-video-storyboard）：默认开
-    files: true,           // 收发文件/文档：默认开
-    memory: true,          // 记忆（自带实现）
-    mcpWrite: false,       // MCP 写操作（建文档/发邮件/建待办）：默认关
-    mcpSendAsMe: false,    // MCP 以管理员真人身份发消息：默认关，且需「用我的身份」闸门
-    sendFileToUser: 'admin', // 给用户发文件的权限：admin | all | off
+    // 浏览器操作：admin = 只有管理员私聊能用；all = 管理员 + 所有私聊；off = 谁都不能用
+    browser: 'admin',
+    memory: true,          // 记忆（自带实现），开关在面板「记忆」栏
+    sendFileToUser: 'admin', // 机器人能往谁那儿发文件：admin | all | off
   },
 
   // ---- 额度（按 token 算）----
@@ -73,18 +72,11 @@ export const DEFAULTS = {
   // ---- 人格 ----
   persona: { current: 'default' },
 
-  // ---- 群上下文 ----
+  // ---- 上下文补齐 ----
+  // 群上下文补齐和断线补拉是同一件事：拿「上次见到消息的时间」当水位，把中间的全部补回来。
+  // 不再有「最短间隔」「最多补几条」这类参数 —— 那是让用户替程序做决定。
   history: {
-    enabled: true,         // 被 @ 时用 MCP 补群上下文
-    syncOnFirstMention: true,
-    syncIntervalMin: 0,    // 0 = 每条 @ 都后台异步更新一次
-    maxMessages: 30,       // 一次最多补多少条
-  },
-
-  // ---- 补拉 ----
-  resync: {
-    enabled: true,         // 断线重连后用 MCP 补拉期间的 @ 消息
-    maxMinutes: 120,       // 最多补拉多久之前的
+    enabled: true,
   },
 }
 
@@ -134,6 +126,10 @@ function normalize(c) {
   if (!ACCESS_MODES.includes(c.accessMode)) c.accessMode = 'whitelist'
   if (!['million', 'tenMillion', 'hundredMillion'].includes(c.quota.unit)) c.quota.unit = 'million'
   if (!['admin', 'all', 'off'].includes(c.features.sendFileToUser)) c.features.sendFileToUser = 'admin'
+  // 浏览器操作从布尔升成三档：老配置里的 true/false 就地迁移，别让用户重设一遍
+  if (c.features.browser === true) c.features.browser = 'admin'
+  else if (c.features.browser === false) c.features.browser = 'off'
+  else if (!['admin', 'all', 'off'].includes(c.features.browser)) c.features.browser = 'admin'
 
   const num = (v, min, max, dflt) => {
     const n = Number(v)
@@ -148,8 +144,6 @@ function normalize(c) {
   c.quota.globalDailyTokens = num(c.quota.globalDailyTokens, 0, 1e12, 50_000_000)
   c.quota.perChatDailyTokens = num(c.quota.perChatDailyTokens, 0, 1e12, 5_000_000)
   c.quota.burstPerMinute = num(c.quota.burstPerMinute, 1, 1000, 30)
-  c.history.maxMessages = num(c.history.maxMessages, 1, 200, 30)
-  c.resync.maxMinutes = num(c.resync.maxMinutes, 5, 6 * 24 * 60, 120)
 
   // 管理员：保证 userid 非空、role 合法、只有一个 owner
   const seen = new Set()

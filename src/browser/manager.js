@@ -57,7 +57,8 @@ export function createBrowserManager({ dataDir, getConfig, log }) {
    * 因为登录页必须能打开浏览器，而开关管的是「模型能不能用浏览器工具」——两件事。
    */
   async function ensure({ force = false } = {}) {
-    if (!force && !cfg().features?.browser) return { ok: false, message: '浏览器能力没开（面板里打开「网页操作」）' }
+    const mode = cfg().features?.browser
+    if (!force && (!mode || mode === 'off')) return { ok: false, message: '浏览器能力没开（面板里打开「浏览器操作」）' }
     const b = instance()
     if (b.connected()) return { ok: true }
     const r = await b.open()

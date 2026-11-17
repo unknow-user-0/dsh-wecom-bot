@@ -43,15 +43,14 @@ const CONFIG = {
   workspaceDir: 'C:\\Users\\Haha\\WeComBot\\chats',
   merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15, placeholder: 'emmm...' },
   longTasks: false,
-  features: { browser: true, video: true, files: true, desktop: false, imageGen: false, speakUp: false, mood: true, memory: true, mcpWrite: false, mcpSendAsMe: false, sendFileToUser: 'admin' },
+  features: { browser: 'admin', memory: true, sendFileToUser: 'admin' },
   quota: { enabled: true, unit: 'million', globalDailyTokens: 50_000_000, perChatDailyTokens: 5_000_000, adminsUnlimited: true, burstPerMinute: 30 },
   model: { provider: '', model: '', reasoningEffort: 'low' },
   persona: { current: 'default' },
   mood: { halfLifeHours: 72 },
   speakUp: { enabled: false, idleMinutes: 120, minIntervalMinutes: 90, maxIntervalMinutes: 240, maxPerDay: 4, awakeFrom: 8, awakeTo: 23, nudge: true },
   imageGen: { enabled: false, provider: 'openai', baseUrl: '', model: '', size: '1024x1024', stylePrompt: '', apiKey: '', custom: { method: 'POST', url: '', bodyType: 'json', responsePath: '', params: [] } },
-  history: { enabled: true, syncOnFirstMention: true, syncIntervalMin: 0, maxMessages: 30 },
-  resync: { enabled: true, maxMinutes: 120 },
+  history: { enabled: true },
 }
 const ROUTES = {
   '/state': STATE,
