@@ -194,8 +194,8 @@ async function main() {
     if (btn2) {
       const t2 = await root2.act(() => btn2.props.onClick())
       const h2 = toHtml(t2)
-      if (h2.includes('查看原图')) { console.log('  ❌ 静态图不该提示「要点开才播」'); bad++ }
-      else console.log('  ✅ 静态图不会误报「要点开才播」')
+      if (h2.includes('默认不会播放')) { console.log('  ❌ 静态图不该提示「默认不会播放」'); bad++ }
+      else console.log('  ✅ 静态图不会误报「默认不会播放」')
     }
   }
 
@@ -205,7 +205,7 @@ async function main() {
   {
     const f = readFileSync(join(OUT, '功能.html'), 'utf8')
     const must = [
-      ['查看原图', '动图在企微里要手动点开才播的提示'],
+      ['默认不会播放', '动图在手机企微里默认不播的提示'],
       ['动图 51 帧', '选完图「真发出去长什么样」的预告'],
     ]
     for (const [needle, what] of must) {

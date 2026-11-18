@@ -916,7 +916,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         // 只对动图提示：静态图本来就不动，说了反而让人以为哪里不对。
         st?.preview?.animated
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6 } },
-            '注意：企微聊天窗里动图不会自己动，对方要点开图片、再点「查看原图」才会播放。')
+            '注意：动图发到手机企微聊天窗里默认不会播放')
           : null,
 
         // 没配 disk/mail/doc 之一的人：图存得住但发不出去，必须提前说，
