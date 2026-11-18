@@ -197,6 +197,16 @@ async function main() {
       if (miss.length) { console.log('  ❌ 「' + label + '」少了：' + miss.join('、')); bad++ }
       else console.log('  ✅ 「' + label + '」里 ' + keys.length + ' 个区块都在')
     }
+    // 「最近动静」是只读回看，不是配置项，必须压在最后 ——
+    // 放中间的话，想改 bot_id 得先划过 30 条聊天记录。
+    {
+      const f = readFileSync(join(OUT, '连接.html'), 'utf8')
+      const order = [...f.matchAll(/<h3 >([^<]*)</g)].map((m) => m[1]).filter((t) => !t.startsWith('今天用了多少') && !t.startsWith('最近动静'))
+      const last = [...f.matchAll(/<h3 >([^<]*)</g)].map((m) => m[1]).pop()
+      if (last !== '最近动静') { console.log('  ❌ 「最近动静」不在最后，当前最后一张是：' + last); bad++ }
+      else console.log('  ✅ 「最近动静」压在最后（前面 ' + order.length + ' 张配置卡）')
+    }
+
     // 嵌套 wb-page 会让 gap 叠加，版块之间空一大块
     const c = readFileSync(join(OUT, '连接.html'), 'utf8')
     if (c.includes('wb-page\"><div class=\"wb-page\"')) { console.log('  ❌ 套了两层 wb-page'); bad++ }

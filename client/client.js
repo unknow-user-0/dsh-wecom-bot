@@ -447,11 +447,13 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     // 连接 = 概览 + 连接 + 额度
     // 顺序照「从上往下排查」来的：先看现在通不通，再改凭据，再看会话落哪，
     // 最后才是花多少额度（额度是通了之后才需要调的东西），最底下是最近动静。
+    // 最近动静是只读回看、不是配置项，压在最后 —— 改设置时永远不用划过它。
     function ConnectTab(P) {
       return h('div', { className: 'wb-page' },
         h(Overview, P),
         h(Connect, P),
-        h(Quota, P))
+        h(Quota, P),
+        h(ActivityFeed, P))
     }
 
     // 用户 = 管理员 + 准入
@@ -474,9 +476,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 
     // ---------------- 概览 ----------------
     function Overview({ st, cfg, setWizard }) {
-      const [activity, setActivity] = useState(null)
-      useEffect(() => { void get('/activity').then((r) => r?.ok && setActivity(r)) }, [])
-      const rows = (activity?.rows || []).slice(-30).reverse()
       return h('div', { className: 'wb-sect' },
         !st.setupDone ? h(Card, { title: '还没配置完', hint: '三步就能聊起来：填 bot_id+secret → 用手机给机器人发条私信拿自己的 userid → 把 userid 填成管理员。' },
           h(Btn, { kind: 'primary', onClick: () => setWizard(true) }, '打开引导向导'))
@@ -489,7 +488,16 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             kv('密钥', st.ready ? '已存' : '没存', st.ready ? 'ok' : 'warn'),
             kv('凭据库', st.vault === 'service' ? 'DSH 凭据库' : '内存（重启会丢）', st.vault === 'service' ? 'ok' : 'warn'),
             kv('准入模式', cfg.accessMode === 'open' ? '开放（谁都能聊）' : '白名单', 'brand'),
-            kv('数据目录', st.dataDir, 'brand'))),
+            kv('数据目录', st.dataDir, 'brand'))))
+    }
+    // 「最近动静」原来夹在概览卡片中间：前面是「跑起来了吗」，后面就是凭据。
+    // 它是只读的回看，不是配置项 —— 夹在要动手改的东西中间，只会把视线往下拽，
+    // 想改 bot_id 得先划过 30 条聊天记录。挪到「连接」最底下：想看就滚到底。
+    function ActivityFeed() {
+      const [activity, setActivity] = useState(null)
+      useEffect(() => { void get('/activity').then((r) => r?.ok && setActivity(r)) }, [])
+      const rows = (activity?.rows || []).slice(-30).reverse()
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '最近动静', hint: '收发的消息都记在这儿，只看最近 30 条。', right: h(Btn, { sm: true, kind: 'ghost', onClick: () => void get('/activity').then((r) => r?.ok && setActivity(r)) }, '刷新') },
           rows.length
             ? h('div', { className: 'wb-list' }, rows.map((r, i) =>
@@ -500,6 +508,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
                     h('div', { className: 'd' }, String(r.text || '').slice(0, 120))))))
             : h(Empty, null, '还没有消息。让谁给机器人发一句试试。')))
     }
+
     function kv(k, v, cls) {
       return h('div', { key: k, className: 'wb-item' },
         h('div', { className: 'main' },
