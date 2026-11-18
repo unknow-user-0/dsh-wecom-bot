@@ -7,7 +7,7 @@
 // 所以这里把边界钉死。
 
 import { stripMention, normalizeInbound } from '../src/chat/inbound.js'
-import { rulesText, personaText, listPersonas, createPersona, deletePersona, setPersonasDir } from '../src/persona/personas.js'
+import { rulesText, personaText, listPersonas, createPersona, deletePersona, savePersona, readPersona, setPersonasDir } from '../src/persona/personas.js'
 import { merge, DEFAULTS } from '../src/core/config.js'
 import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -101,6 +101,18 @@ check('内置卡删不掉，且给出理由', delBuiltin.ok === false && /内置
 check('内置卡确实还在', listPersonas().some((p) => p.id === 'default'))
 const weird = deletePersona('../../etc/passwd')
 check('id 里的路径符号被清掉，不会越界删', weird.ok === false, JSON.stringify(weird))
+
+console.log('\n⑩ frontmatter 不被标题写坏')
+// frontmatter 逐行解析，标题里一个换行就能把后面几行挤成元数据；
+// 标题里写「---」更狠，直接把正文整段当元数据丢掉。
+savePersona('evil', { name: '我的卡\n---\ntags: [x]\n第二行', body: '正文第一行\n---\n正文还在吗' })
+const evil = readPersona('evil')
+check('标题里的换行被压成一行', !evil.name.includes('\n'), JSON.stringify(evil.name))
+check('标题里的 --- 不会把正文切掉', evil.body.includes('正文还在吗'), evil.body)
+savePersona('blank', { name: '\n\n  \n', body: 'x' })
+check('标题全是空白时兜底成 id', readPersona('blank').name === 'blank', readPersona('blank').name)
+savePersona('tagged', { name: 'T', tags: ['a,b', 'c]d', 'ok'], body: 'x' })
+check('tags 里的逗号方括号被清掉，不会解析乱', readPersona('tagged').tags.join('/') === 'ab/cd/ok', JSON.stringify(readPersona('tagged').tags))
 
 console.log(`\n${fail === 0 ? '✅ 全部通过' : '❌ 有失败'}：${pass} 项通过，${fail} 项失败\n`)
 process.exit(fail === 0 ? 0 : 1)

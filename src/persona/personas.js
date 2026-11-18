@@ -67,10 +67,21 @@ export function readPersona(id) {
   return all.find((p) => p.id === id) || all[0] || { id: 'default', name: '默认人格', tags: [], body: '', kind: 'builtin' }
 }
 
+// frontmatter 是逐行解析的（parseFront 按 \n 切）。标题里带换行会把
+// 后面几行挤成新的元数据行，最狠的是标题里写个「---」直接把正文整段当成
+// 元数据丢掉。用户输入框里粘贴多行是常事，所以在写盘前压成一行。
+function metaSafe(value, fallback) {
+  const one = String(value == null ? '' : value).replace(/[\r\n]+/g, ' ').trim()
+  // 「---」在 frontmatter 里是终止符，留着就把文件切成了两半。
+  return one.replace(/-{3,}/g, '—').slice(0, 120) || String(fallback || '')
+}
+
 export function savePersona(id, { name, tags, body }) {
   ensureUserDir()
   const clean = String(id || '').replace(/[^A-Za-z0-9_-]/g, '') || 'persona'
-  const front = ['---', `name: ${String(name || clean).trim()}`, `tags: [${(tags || []).join(', ')}]`, '---', ''].join('\n')
+  const safeName = metaSafe(name, clean)
+  const safeTags = (tags || []).map((t) => metaSafe(t, '').replace(/[,[\]]/g, '')).filter(Boolean)
+  const front = ['---', `name: ${safeName}`, `tags: [${safeTags.join(', ')}]`, '---', ''].join('\n')
   writeFileSync(join(USER_DIR, `${clean}.md`), front + String(body || ''), 'utf8')
   return clean
 }

@@ -756,6 +756,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [text, setText] = useState('')
       const [name, setName] = useState('')
       const [fresh, setFresh] = useState('')
+      const [copyAs, setCopyAs] = useState('')
       const [busy, setBusy] = useState(false)
       const load = useCallback(async () => {
         const r = await get('/personas')
@@ -768,20 +769,34 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         })
       }, [draft.persona?.current])
       const pick = async (id) => { setD('persona.current', id) }
+      // 「保存」永远是覆盖当前这张（按 id = 文件名定位），不会变成新的一张。
+      // 想留下原件就用下面的「另存为」。
       const saveP = async () => {
         if (!cur) return
         const r = await post('/persona/save', { id: cur.id, name: name || cur.name, body: text, select: true })
-        if (r?.ok) { toast('角色卡已保存', 'ok'); void load(); void reload() }
+        if (r?.ok) { toast('已覆盖这张角色卡', 'ok'); void load(); void reload() }
         else toast(r?.message || '保存失败', 'err')
       }
       const makeNew = async () => {
         const id = fresh.trim()
-        if (!id) { toast('先给新角色卡起个 id', 'err'); return }
+        if (!id) { toast('先起个 id', 'err'); return }
         setBusy(true)
         const r = await post('/persona/create', { id, name: id, body: '' })
         setBusy(false)
-        if (r?.ok) { setFresh(''); toast('建好了，现在可以写正文', 'ok'); void load(); setD('persona.current', r.id) }
+        if (r?.ok) { setFresh(''); toast('建好了一张空白卡', 'ok'); void load(); setD('persona.current', r.id) }
         else toast(r?.message || '新建失败', 'err')
+      }
+      // 另存为：把编辑区当前的内容写到一个新 id 下，原卡不动。
+      // 这是「改标题本该新建一张」那个误解的正确出口。
+      const copyTo = async () => {
+        const id = copyAs.trim()
+        if (!id) { toast('先给副本起个 id', 'err'); return }
+        if (rows.some((p) => p.id === id)) { toast('这个 id 已经有一张了', 'err'); return }
+        setBusy(true)
+        const r = await post('/persona/create', { id, name: name || id, body: text })
+        setBusy(false)
+        if (r?.ok) { setCopyAs(''); toast('已另存为一张新卡，原卡没动', 'ok'); void load(); setD('persona.current', r.id) }
+        else toast(r?.message || '另存失败', 'err')
       }
       const drop = async (id) => {
         const r = await post('/persona/delete', { id })
@@ -804,14 +819,18 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           h('div', { className: 'wb-row' },
             h('input', { className: 'wb-input', style: { maxWidth: 260 }, value: fresh, placeholder: '比如 bt7274', onChange: (e) => setFresh(e.target.value) }),
             h(Btn, { onClick: () => void makeNew(), disabled: busy || !fresh.trim() }, '新建'))),
-        cur ? h(Card, { title: '编辑：' + cur.id, hint: '改完点保存。保存后下一轮对话就生效（不用重启）。' },
+        cur ? h(Card, { title: '编辑：' + cur.id, hint: '这张卡的身份就是它的 id（' + cur.id + '），标题只是显示用，改了也不会变成另一张。保存 = 覆盖它。' },
           h('div', { className: 'wb-grid' },
-            h(Field, { label: '角色卡名（只是标题）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
+            h(Field, { label: '标题（显示用，不影响身份）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
           h('div', { style: { marginTop: 10 } },
             h('textarea', { className: 'wb-area', value: text, onChange: (e) => setText(e.target.value), spellCheck: false })),
           h('div', { className: 'wb-row', style: { marginTop: 10 } },
-            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存角色卡'),
-            h('span', { className: 'wb-dim wb-small' }, '内置的删不掉；想改就新建一张覆盖它。'))) : null,
+            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存（覆盖这张）'),
+            h('span', { className: 'wb-dim wb-small' }, '内置的删不掉；想改就另存为一张新的。')),
+          h('div', { className: 'wb-row', style: { marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--wb-line, rgba(127,127,127,.18))' } },
+            h('span', { className: 'wb-dim wb-small' }, '想保住原件：'),
+            h('input', { className: 'wb-input', style: { maxWidth: 200 }, value: copyAs, placeholder: '新 id，比如 bt7274-v2', onChange: (e) => setCopyAs(e.target.value) }),
+            h(Btn, { onClick: () => void copyTo(), disabled: busy || !copyAs.trim() }, '另存为一张新卡'))) : null,
         switched ? h('div', { className: 'wb-hint', style: { marginTop: 2 } },
           '换了角色卡，记得去企业微信后台把这台机器人的名字也改一下 —— 我们改不了那边的名字。不改也能用：名字已经不进提示词了，只是群里别人 @ 它时看到的还是旧名字。') : null)
     }
