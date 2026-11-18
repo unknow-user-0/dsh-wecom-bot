@@ -61,6 +61,15 @@ const ROUTES = {
     { at: now - 3600e3, kind: 'in', chatId: 'wrABC123', name: '太子群', text: '@海棠 看下这个表格' },
   ], stats: { chats: 2, today: 3 } },
   '/quota': { ok: true, usage: { date: '2026-11-16', global: 1_234_567, chats: { 'dm:wofL_…': 800_000, 'group:wrABC123': 434_567 } } },
+  // 占位图状态：故意给一张「动图但不用压」的，让功能页把「发出去长什么样」
+  // 和「企微里要手动点开才动」这两行都渲染出来。以前没有这个桩，
+  // 功能页一直走「没选图」的分支，新加的提示等于没被测试覆盖过。
+  '/placeholder/state': { ok: true, image: 'C:\\\\Users\\\\Haha\\\\.dsh\\\\plugins-data\\\\wecom-bot\\\\placeholder.gif', bytes: 227_825, hasUpload: true, lastImageError: '', preview: {
+    bytes: 227_825, width: 480, height: 160, animated: true, pages: 51, durationMs: 3000,
+    finalBytes: 227_825, finalPages: 51, finalDurationMs: 3000, finalWidth: 480,
+    finalMime: 'image/gif', dropped: false, droppedFrames: 0, fitsBudget: true, sendable: true,
+    note: '动图 51 帧，3.0 秒，不用压',
+  } },
   '/memory': { ok: true, rows: [
     { id: 'm1', text: '老大不喜欢被叫「您」', scope: 'person', type: 'preference', about: '老大', at: now - 3600e3 },
     { id: 'm2', text: '这个群每周一开周会', scope: 'scene', type: 'fact', chatName: '太子群', at: now - 7200e3 },
@@ -168,11 +177,41 @@ async function main() {
       continue
     }
     const html = toHtml(tree)
-    const file = join(OUT, label + '.html')
-    writeFileSync(file, wrap(label, html), 'utf8')
+    writeFileSync(join(OUT, label + '.html'), wrap(label, html), 'utf8')
     const short = html.length < 2000
     if (short) bad++
-    console.log(`  ${label.padEnd(6)} ${String(html.length).padStart(7)} 字符  → ${file}${short ? '  ⚠ 有点短' : ''}`)
+    console.log(`  ${label.padEnd(6)} ${String(html.length).padStart(7)} 字符  → ${join(OUT, label + ".html")}${short ? '  ⚠ 有点短' : ''}`)
+  }
+
+  // 反过来的情况也要守：静态图本来就不动，要是也弹「要点开才播」，
+  // 配图的人会以为哪里出了毛病。把桩换成静态图重渲染一遍，确认提示消失。
+  {
+    ROUTES['/placeholder/state'].preview.animated = false
+    ROUTES['/placeholder/state'].preview.pages = 1
+    const root2 = mini.createRoot(Page, {})
+    await root2.run()
+    const btn2 = findByText(root2.getTree(), '功能').find((n) => n.type === 'button')
+    if (btn2) {
+      const t2 = await root2.act(() => btn2.props.onClick())
+      const h2 = toHtml(t2)
+      if (h2.includes('查看原图')) { console.log('  ❌ 静态图不该提示「要点开才播」'); bad++ }
+      else console.log('  ✅ 静态图不会误报「要点开才播」')
+    }
+  }
+
+  // 文案断言：有些提示删掉了页面照样渲染，只有断言拦得住。
+  // 这条守的是「配了动图的人必须知道企微里要手动点开才动」——
+  // 他精心挑了张表情包，对面看到的却是静止画，还得怪我们压坏了。
+  {
+    const f = readFileSync(join(OUT, '功能.html'), 'utf8')
+    const must = [
+      ['查看原图', '动图在企微里要手动点开才播的提示'],
+      ['动图 51 帧', '选完图「真发出去长什么样」的预告'],
+    ]
+    for (const [needle, what] of must) {
+      if (!f.includes(needle)) { console.log(`  ❌ 功能页缺了：${what}（找不到「${needle}」）`); bad++ }
+      else console.log(`  ✅ 功能页有：${what}`)
+    }
   }
 
   console.log(bad ? `\n❌ ${bad} 个标签页有问题` : `\n✅ ${TABS.length} 个标签页都渲染出来了 → ${OUT}`)

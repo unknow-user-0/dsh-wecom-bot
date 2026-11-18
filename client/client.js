@@ -910,6 +910,15 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               : null)
           : null,
 
+        // 企微聊天窗里动图不会自动播：对方得点开图片、再点「查看原图」才动。
+        // 这是客户端行为，插件改不了；但配图的人必须提前知道 ——
+        // 否则他精心挑了个表情包，对面看到的是一张静止画，还以为是被我们压坏了。
+        // 只对动图提示：静态图本来就不动，说了反而让人以为哪里不对。
+        st?.preview?.animated
+          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6 } },
+            '注意：企微聊天窗里动图不会自己动，对方要点开图片、再点「查看原图」才会播放。')
+          : null,
+
         // 没配 disk/mail/doc 之一的人：图存得住但发不出去，必须提前说，
         // 否则他配完一圈以为好了，实际对方只收到 emmm...
         st && st.hasUpload === false
