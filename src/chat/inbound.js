@@ -7,17 +7,49 @@
 //
 // 三个必须知道的协议特点：
 //   1. 群聊只有 @机器人 才回调 → mentionedBot 恒 true，没有信息量，不要把判断挂它上面
-//   2. text.content 带 "@机器人名 " 前缀，但**我们不做字符串剥离** ——
-//      系统提示里告诉模型「你叫 X」，让它自己理解。原因：剥错比不剥更糟
+//   2. text.content 带 "@机器人名 " 前缀。我们在传输层剥掉 ——
+//      名字是寻址信息，不是身份信息：它只决定「这条消息是冲着谁来的」，
+//      不该进模型的认知层（否则会和角色卡里的自称打架）。
+//      剥离必须先精确匹配配置里的名字，匹配不上才退到「第一个 @ 后到空白」，
+//      并且要求名字至少 2 个字 —— 否则 @李老师说 会被剥成 老师说。
 //   3. chattype=single 时**没有 chatid**，单聊的会话标识就是 from.userid
 
 import { mediaDecrypt, sniffImageMime, sniffFileExt, imageExt, fitImageToBudget, looksLikeImage, looksLikeVideo } from '../wecom/media.js'
 
 /**
+ * 剥掉群消息开头的 @机器人名。
+ *
+ * 关键前提（协议事实，见文件头第 1 条）：群聊只有 @机器人 才会回调，
+ * 所以群消息开头的 @xxx **一定**是 @ 了机器人。这让剥离变得比想象中简单 ——
+ * 不用猜「@海棠花」是 @了叫海棠花的人 还是 @海棠 + 正文「花」，
+ * 它就是后者。于是配置了名字就直接按名字前缀剥，不必要求名字后紧跟分隔符。
+ *
+ * @returns {string} 剥完的文本（可能是空串，表示对方只 @ 了一下没说话）
+ */
+export function stripMention(text, botName) {
+  const raw = String(text ?? '')
+  if (!raw.startsWith('@')) return raw
+
+  const name = String(botName || '').trim()
+
+  // 1) 配置了名字：按前缀剥。名字后面可能是空格、冒号，也可能直接就是正文。
+  if (name && raw.startsWith('@' + name)) {
+    return raw.slice(1 + name.length).replace(/^[\s\u3000:：,，]+/, '')
+  }
+
+  // 2) 没配名字（或名字过时了）：退到「@ 到第一个分隔符」。
+  //    要求至少 2 个字 —— 单个字母/字在当前语境里更可能是正文而不是名字，
+  //    剥错了用户的话就少一截，这种损失不可恢复，宁可不剥。
+  const m = /^@([^\s\u3000:：,，]{2,20})[\s\u3000:：,，]*/.exec(raw)
+  if (m) return raw.slice(m[0].length)
+  return raw
+}
+
+/**
  * @returns {{ chat, text, images, files, msgid, reqId, raw }}
  *   chat = { kind:'dm'|'group', chatId, userId, displayName, groupName }
  */
-export function normalizeInbound(frame) {
+export function normalizeInbound(frame, { botName = '' } = {}) {
   const body = frame.body || {}
   const chattype = body.chattype === 'group' ? 'group' : 'single'
   const kind = chattype === 'group' ? 'group' : 'dm'
@@ -41,6 +73,12 @@ export function normalizeInbound(frame) {
   else if (msgtype === 'voice') text = String(body.voice?.content || '[语音]')
   else if (msgtype === 'mixed') text = String(body.mixed?.text?.content || '[混合消息]')
   else text = `[暂不支持的消息类型：${msgtype || 'unknown'}]`
+
+  // 只有群聊的 text 会带 @ 前缀（单聊没有 @ 这回事）。剥完空掉说明对方只 @ 了一下。
+  if (kind === 'group' && msgtype === 'text') {
+    const stripped = stripMention(text, botName)
+    text = stripped.trim() === '' && text.trim() !== '' ? '[对方只 @ 了一下，没说话]' : stripped
+  }
 
   return {
     chat,

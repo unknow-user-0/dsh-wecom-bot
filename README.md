@@ -1,6 +1,6 @@
 # dsh-wecom-bot
 
-把**企业微信智能机器人**接进 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)：长连接收消息、每个会话一个独立 DSH 会话、带人格与记忆，能在企微里跟人聊天，也能在你允许的范围内操作浏览器、看视频、收发文件、操作企微文档微盘邮件待办日程。
+把**企业微信智能机器人**接进 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)：长连接收消息、每个会话一个独立 DSH 会话、带角色卡与记忆，能在企微里跟人聊天，也能在你允许的范围内操作浏览器、看视频、收发文件、操作企微文档微盘邮件待办日程。
 
 不是客服机器人。它更像一个被你拉进企业微信的成员：会打字、有记性、能看网页能看图看视频，群里要 @ 它，私聊不用。
 
@@ -114,7 +114,7 @@ https://qyapi.weixin.qq.com/mcp/v2/bot/<service>?apikey=<你的KEY>
 | --- | --- |
 | 连接 | 连没连上、数据目录、最近 30 条收发 / bot_id 与 secret、断开重连、机器人名字、长任务档位（**默认开**）、会话列表 / 按 token 计的每日额度（全局 + 每会话） |
 | 用户 | 加/删管理员、每人的 8 个 MCP 地址（可单独测）/ 白名单 ⇄ 开放模式、白名单人和群、连发合并（对方停顿几秒算说完）、工作区目录（可迁移） |
-| 自我 | 切人格、在线编辑 / 记忆开关、分层统计、搜索、逐条删 |
+| 自我 | 切角色卡、新建 / 在线编辑 / 删除 / 记忆开关、分层统计、搜索、逐条删 |
 | 功能 | 浏览器操作三档、发文件权限、上下文补齐（水位 + 分批）、占位文案与占位图、视频站登录、ASR 连接 |
 | 日志 | 实时日志（含脱敏） |
 
@@ -135,7 +135,7 @@ https://qyapi.weixin.qq.com/mcp/v2/bot/<service>?apikey=<你的KEY>
 
 - 每一个企微会话（一个私聊 or 一个群）对应一个**独立的 DSH 会话**，落在工作区「企业微信 · AI」下（目录可改）。
 - 档位分两档，按「是谁在说话」定：
-  - `owner` —— 管理员私聊：人格 + 全部工具 + 浏览器 + 视频 + 文件
+  - `owner` —— 管理员私聊：角色卡 + 全部工具 + 浏览器 + 视频 + 文件
   - `social` —— 群聊 / 普通成员：只有企微社交工具和看视频，零本地能力
 - 群被 @ 时，会先用 MCP 把这个群从「上次同步」到现在的消息补进会话历史（只写不发，不惊动模型），再把当前这条交给模型。
 - 断线重连后，同样用 MCP 补拉断线期间的消息。
@@ -207,6 +207,7 @@ node dev/tools-check.mjs  # 工具 schema 检查（不连 DSH 不连企微）
 node dev/e2e.mjs          # 端到端：假企微服务 + 假宿主 + 真插件
 node dev/render-pages.mjs # 把面板 5 个版块渲染成 HTML 快照到 .snap/
 node dev/tab-dirty.mjs    # 「有改动」圆点有没有亮错格（合并版块后容易串）
+node dev/names.mjs        # 剥 @ 前缀 / 旧名字别名 / 角色卡增删
 node dev/real-probe.mjs   # 用真凭据连真企微长连接
 ```
 
@@ -231,9 +232,9 @@ src/
   tools/               企微工具、浏览器工具、视频工具、defineTool
   browser/             CDP 控件、浏览器管理器（cookie 导入导出）
   memory/              四层记忆
-  persona/             人格文件读写
+  persona/             角色卡文件读写
 client/client.js       网页半边：侧栏图标 + 10 页面板
-personas/default.md    内置人格
+personas/default.md    内置角色卡
 cordis.patch.yml       插件本体 + 三个 agent preset
 ```
 

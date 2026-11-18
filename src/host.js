@@ -28,7 +28,7 @@ import { createMerger } from './chat/merge.js'
 import { createPlaceholder } from './chat/placeholder.js'
 import { createBackfill } from './chat/backfill.js'
 import { normalizeInbound, attachInboundImage, attachInboundFile } from './chat/inbound.js'
-import { listPersonas, readPersona, savePersona, deletePersona, personaText, rulesText } from './persona/personas.js'
+import { listPersonas, readPersona, savePersona, deletePersona, createPersona, personaText, rulesText } from './persona/personas.js'
 import * as memory from './memory/store.js'
 import { buildTools } from './tools/wecom.js'
 import { buildBrowserTools } from './tools/browser.js'
@@ -465,7 +465,7 @@ export function apply(ctx) {
   // ---------- 入站主流程 ----------
   async function onInbound(frame) {
     let message
-    try { message = normalizeInbound(frame) } catch (error) {
+    try { message = normalizeInbound(frame, { botName: cfg.botName }) } catch (error) {
       log.warn(`入站解析失败：${error.message}`)
       return
     }
@@ -651,6 +651,16 @@ export function apply(ctx) {
 
   const setConfig = (next) => {
     const before = cfg
+    // 改名时把旧名字记进别名。理由：历史消息里残留的「@旧名」不会因为改名而消失，
+    // 系统提示里声明一遍「那也是在叫我」，模型就不会把它当成一个陌生人。
+    // 只记 2 个字以上的，避免把空值/半截名字塞进去；最多留 5 条。
+    const oldName = String(before?.botName || '').trim()
+    const newName = String(next?.botName || '').trim()
+    if (oldName && oldName !== newName && oldName.length >= 2) {
+      const kept = (Array.isArray(next.botNameAliases) ? next.botNameAliases : [])
+        .filter((n) => n && n !== oldName && n !== newName)
+      next = { ...next, botNameAliases: [oldName, ...kept].slice(0, 5) }
+    }
     cfg = saveConfig(next)
     if (before.enabled !== cfg.enabled || before.botId !== cfg.botId) {
       fireAndForget((async () => {
@@ -843,7 +853,20 @@ export function apply(ctx) {
   })
   route('/persona/delete', async (req) => {
     const body = await readBody(req)
-    return { ok: deletePersona(body.id) }
+    const r = deletePersona(body.id)
+    if (!r.ok) return { ok: false, message: r.reason }
+    // 删掉的正好是当前在用的那张 —— 必须自动切回 default，
+    // 否则 cfg.persona.current 指向一个不存在的文件，readPersona 会静默退到第一张，
+    // 面板上还显示旧名字，用户以为没删掉。
+    if (String(body.id) === String(cfg.persona.current)) {
+      setConfig({ ...cfg, persona: { ...cfg.persona, current: 'default' } })
+    }
+    return { ok: true }
+  })
+  route('/persona/create', async (req) => {
+    const body = await readBody(req)
+    const r = createPersona(body.id, { name: body.name, tags: body.tags, body: body.body })
+    return r.ok ? { ok: true, id: r.id } : { ok: false, message: r.reason }
   })
   route('/admin/add', async (req) => {
     const body = await readBody(req)

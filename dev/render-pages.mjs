@@ -189,7 +189,7 @@ async function main() {
     const need = {
       '连接': ['跑起来了吗', '机器人凭据', '会话映射', '按 token 算', '最近动静'],
       '用户': ['管理员列表', '准入模式'],
-      '自我': ['选人格', '记忆库'],
+      '自我': ['选角色卡', '记忆库'],
     }
     for (const [label, keys] of Object.entries(need)) {
       const f = readFileSync(join(OUT, label + '.html'), 'utf8')
