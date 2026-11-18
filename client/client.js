@@ -138,6 +138,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 .wb-tab.on{background:var(--wb-tint-2);color:var(--wb-deep);font-weight:600}
 .wb-tab i.dirty{width:6px;height:6px;border-radius:50%;background:var(--wb-warn)}
 .wb-page{display:flex;flex-direction:column;gap:14px}
+/* 合并后的版块里装的是几个旧页，布局跟整页一样，只是不再自己带内边距 */
+.wb-sect{display:flex;flex-direction:column;gap:14px}
 .wb-card{border:1px solid var(--wb-line);border-radius:14px;background:var(--wb-card);padding:16px 18px}
 .wb-card>h3{margin:0 0 4px;font-size:14px;font-weight:650;display:flex;align-items:center;gap:8px}
 .wb-card>p.wb-hint{margin:0 0 12px;color:var(--wb-sub);font-size:12.5px}
@@ -281,7 +283,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [cfg, setCfg] = useState(null)
       const [draft, setDraft] = useState(null)
       const [services, setServices] = useState([])
-      const [tab, setTab] = useState('overview')
+      const [tab, setTab] = useState('connect')
       const [toastMsg, setToastMsg] = useState(null)
       const [wizard, setWizard] = useState(false)
       const toastTimer = useRef(0)
@@ -372,34 +374,37 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const statusCls = st.connected ? 'ok' : (st.enabled && !st.ready ? 'warn' : 'err')
       const statusText = st.connected ? '已连接' : (st.kicked ? '被踢下线' : st.reason || (st.enabled ? '连接中' : '未开启'))
 
+      // 五个版块，按「配置时要一起想的事情」分组，而不是按代码里的模块分。
+      // 原来九格是照着内部结构切的，配置的人得来回跳：填完凭据去准入改白名单，
+      // 回头又发现额度在另一页。合并后每格只回答一个问题。
       const TABS = [
-        { id: 'overview', label: '概览' },
         { id: 'connect', label: '连接' },
-        { id: 'admins', label: '管理员' },
-        { id: 'access', label: '准入' },
-        { id: 'persona', label: '人格' },
+        { id: 'users', label: '用户' },
+        { id: 'self', label: '自我' },
         { id: 'features', label: '功能' },
-        { id: 'quota', label: '额度' },
-        { id: 'memory', label: '记忆' },
         { id: 'logs', label: '日志' },
       ]
+      // 一个版块里装了几个旧页，脏标记就得把这几个旧页管的键都算上，
+      // 否则在这一格改了另一半的东西，圆点不亮，用户以为没保存成功。
+      // 但也不能粗暴地按整块算：features 和 merge 现在被两个版块分着管，
+      // 传整个对象的话，在「功能」页改浏览器，圆点会亮在「自我」上 —— 假信号
+      // 会让这个圆点彻底不可信，所以按具体字段列，用点路径取。
       const TAB_KEYS = {
-        connect: ['botId', 'botName', 'longTasks'],
-        access: ['accessMode', 'allow', 'autoRegister', 'merge'],
-        // 不把 merge 列进来：准入页改了阈值的话，功能页也会跟着亮一个「有改动」，
-        // 而功能页上并没有对应控件 —— 假信号会让这个圆点变得不可信。
-        // 功能页自己的占位开关改完，底部保存栏照样会亮，漏个小圆点不影响什么。
-        features: ['features', 'history'],
-        quota: ['quota'],
-        persona: ['persona'],
+        connect: ['botId', 'botName', 'longTasks', 'quota'],
+        users: ['admins', 'accessMode', 'allow', 'autoRegister',
+          'merge.enabled', 'merge.waitSec', 'merge.maxSec', 'merge.groupWaitSec', 'merge.groupMaxSec'],
+        self: ['persona', 'features.memory'],
+        features: ['features.browser', 'features.sendFileToUser', 'history',
+          'merge.placeholder', 'merge.placeholderOn', 'merge.placeholderImage', 'merge.placeholderImageOn'],
       }
-      const tabDirty = (id) => (TAB_KEYS[id] || []).some((k) => JSON.stringify(draft[k]) !== JSON.stringify(cfg[k]))
+      const at = (obj, path) => path.split('.').reduce((v, k) => (v == null ? v : v[k]), obj)
+      const tabDirty = (id) => (TAB_KEYS[id] || [])
+        .some((k) => JSON.stringify(at(draft, k)) !== JSON.stringify(at(cfg, k)))
 
       const P = { st, cfg, draft, setD, services, toast, reload, save, quickToggle, setWizard }
       const body = {
-        overview: Overview, connect: Connect, admins: Admins, access: Access, persona: Persona,
-        features: Features, quota: Quota, memory: Memory, logs: Logs,
-      }[tab] || Overview
+        connect: ConnectTab, users: UsersTab, self: SelfTab, features: Features, logs: Logs,
+      }[tab] || ConnectTab
 
       return h('div', { className: 'wb-root' },
         h('div', { className: 'wb-wrap' },
@@ -420,7 +425,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               TABS.map((t) => h('button', {
                 key: t.id, type: 'button', className: cx('wb-tab', tab === t.id && 'on'), onClick: () => setTab(t.id),
               }, t.label, tabDirty(t.id) ? h('i', { className: 'dirty', title: '有没保存的改动' }) : null)))),
-          h('div', { className: 'wb-page' }, h(body, P)),
+          // 这里不再套一层 wb-page：每个版块自己就是 wb-page。
+          // 套两层会让 gap 叠加，版块之间空出一大块，看着像分页断了。
+          h(body, P),
           dirty ? h('div', { className: 'wb-savebar' },
             h('span', { className: 'msg' }, '有改动还没保存'),
             h('span', { className: 'wb-muted wb-small' }, h('span', { className: 'wb-kbd' }, 'Ctrl'), ' + ', h('span', { className: 'wb-kbd' }, 'S')),
@@ -431,12 +438,46 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       )
     }
 
+    // ---------------- 组合版块 ----------------
+    // 合并的取舍：按「配置的时候会一起想的事情」分组，不是按代码里的模块分。
+    // 原来九格是照内部结构切的，配的人得来回跳 —— 填完凭据去准入改白名单，
+    // 回头发现额度又在一页，最后还得回概览看连没连上。
+    // 合并后每格只回答一个问题：连得上吗、谁能用、它是什么样的、会做哪些事、出过什么事。
+
+    // 连接 = 概览 + 连接 + 额度
+    // 顺序照「从上往下排查」来的：先看现在通不通，再改凭据，再看会话落哪，
+    // 最后才是花多少额度（额度是通了之后才需要调的东西），最底下是最近动静。
+    function ConnectTab(P) {
+      return h('div', { className: 'wb-page' },
+        h(Overview, P),
+        h(Connect, P),
+        h(Quota, P))
+    }
+
+    // 用户 = 管理员 + 准入
+    // 这两件事是一体的：谁是管理员，和「谁能进来聊」。只改一半会出现
+    // 「白名单里放进来的人，AI 却当他是路人」这种半吊子状态。
+    function UsersTab(P) {
+      return h('div', { className: 'wb-page' },
+        h(Admins, P),
+        h(Access, P))
+    }
+
+    // 自我 = 人格 + 记忆
+    // 人格决定它怎么说话，记忆决定它记得什么 —— 都是「它是谁」的一部分。
+    // 而且记忆开关原本在功能页，开关和它控制的东西隔着一格，早就该搬过来。
+    function SelfTab(P) {
+      return h('div', { className: 'wb-page' },
+        h(Persona, P),
+        h(Memory, P))
+    }
+
     // ---------------- 概览 ----------------
     function Overview({ st, cfg, setWizard }) {
       const [activity, setActivity] = useState(null)
       useEffect(() => { void get('/activity').then((r) => r?.ok && setActivity(r)) }, [])
       const rows = (activity?.rows || []).slice(-30).reverse()
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         !st.setupDone ? h(Card, { title: '还没配置完', hint: '三步就能聊起来：填 bot_id+secret → 用手机给机器人发条私信拿自己的 userid → 把 userid 填成管理员。' },
           h(Btn, { kind: 'primary', onClick: () => setWizard(true) }, '打开引导向导'))
           : h(Card, { title: '引导向导', hint: '配好了也能再来一遍；只改你填的东西，不会重置已有设置。' },
@@ -484,7 +525,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         setSecret('')
         void reload()
       }
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '机器人凭据', hint: '在企业微信管理后台 → 应用管理 → 智能机器人 → API 模式里拿 bot_id 和 secret。密钥存进 DSH 凭据库，不写配置文件。' },
           h('div', { className: 'wb-grid' },
             h(Field, { label: 'bot_id', tip: '以 aib 开头的那串' },
@@ -547,7 +588,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         setTesting(false)
         toast(r?.ok ? `通了，${r.count} 个工具：${(r.names || []).slice(0, 4).join('、')}…` : r?.message || '连不上', r?.ok ? 'ok' : 'err')
       }
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '加管理员', hint: 'userid 让本人给机器人发一条私信就能看到（机器人会回他的 ID）。第一个是主人档，会有电脑权限。' },
           h('div', { className: 'wb-grid' },
             h(Field, { label: 'userid', tip: '企业内唯一，形如 wofL_hCgAAJ5…' },
@@ -589,7 +630,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     function Access({ cfg, draft, setD, toast, reload }) {
       const [uid, setUid] = useState('')
       const [gid, setGid] = useState('')
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '准入模式', hint: '白名单（开源默认）：只有名单里的人/群能聊。开放：谁给机器人发消息都能聊，还能自动登记名单，方便以后切回白名单。' },
           h('div', { className: 'wb-seg' },
             h('button', { type: 'button', className: cx(draft.accessMode === 'whitelist' && 'on'), onClick: () => setD('accessMode', 'whitelist') }, '白名单'),
@@ -722,7 +763,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         if (r?.ok) { toast('人格已保存', 'ok'); void load(); void reload() }
         else toast(r?.message || '保存失败', 'err')
       }
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '选人格', hint: '人格就是系统提示词的前半段。{{name}} 会替换成机器人名字。' },
           rows.length
             ? h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
@@ -1173,7 +1214,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const mult = unit === 'hundredMillion' ? 1e8 : unit === 'tenMillion' ? 1e7 : 1e6
       const g = draft.quota?.globalDailyTokens || 0
       const p = draft.quota?.perChatDailyTokens || 0
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         h(Card, { title: '按 token 算，不是按条数算', hint: '一条消息里塞个 PDF 就能烧掉几万 token，按条数算挡不住。0 = 不限。' },
           h('div', { className: 'wb-between' },
             h('div', null, h('div', null, '启用额度'), h('div', { className: 'wb-dim wb-small' }, '关掉 = 完全不限制')),
@@ -1214,7 +1255,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       }, [])
       useEffect(() => { void load('') }, [load])
       const del = async (id) => { const r = await post('/memory/delete', { id }); if (r?.ok) { toast('删了', 'ok'); void load(q) } }
-      return h('div', { className: 'wb-page' },
+      return h('div', { className: 'wb-sect' },
         // 记忆开关搬到这里了 —— 开关和它控制的东西放同一页，不用在「功能」和「记忆」之间来回跳
         h(Card, { title: '记忆', hint: '关掉之后不再记新的，也不召回旧的。已经记下来的东西不会删。' },
           h('div', { className: 'wb-between' },

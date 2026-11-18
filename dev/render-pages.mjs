@@ -129,7 +129,7 @@ const fetchJson = async (p) => {
   return { json: async () => ROUTES[path] || { ok: false, message: 'no route ' + path } }
 }
 
-const TABS = ['概览', '连接', '管理员', '准入', '人格', '功能', '额度', '记忆', '日志']
+const TABS = ['连接', '用户', '自我', '功能', '日志']
 
 async function main() {
   mkdirSync(OUT, { recursive: true })
@@ -181,6 +181,25 @@ async function main() {
     const short = html.length < 2000
     if (short) bad++
     console.log(`  ${label.padEnd(6)} ${String(html.length).padStart(7)} 字符  → ${join(OUT, label + ".html")}${short ? '  ⚠ 有点短' : ''}`)
+  }
+
+  // 合并版块最容易出的错是「漏了一个旧页」：页面照样渲染、字数也够，
+  // 只是那几组设置消失了，用户找不到还以为被删了。按区块标题点名核对。
+  {
+    const need = {
+      '连接': ['跑起来了吗', '机器人凭据', '会话映射', '按 token 算', '最近动静'],
+      '用户': ['管理员列表', '准入模式'],
+      '自我': ['选人格', '记忆库'],
+    }
+    for (const [label, keys] of Object.entries(need)) {
+      const f = readFileSync(join(OUT, label + '.html'), 'utf8')
+      const miss = keys.filter((k) => !f.includes(k))
+      if (miss.length) { console.log('  ❌ 「' + label + '」少了：' + miss.join('、')); bad++ }
+      else console.log('  ✅ 「' + label + '」里 ' + keys.length + ' 个区块都在')
+    }
+    // 嵌套 wb-page 会让 gap 叠加，版块之间空一大块
+    const c = readFileSync(join(OUT, '连接.html'), 'utf8')
+    if (c.includes('wb-page\"><div class=\"wb-page\"')) { console.log('  ❌ 套了两层 wb-page'); bad++ }
   }
 
   // 反过来的情况也要守：静态图本来就不动，要是也弹「要点开才播」，
