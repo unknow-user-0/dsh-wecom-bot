@@ -84,8 +84,23 @@ function unwrap(response) {
       let payload
       try { payload = JSON.parse(block.text) } catch { return { text: block.text } }
       const stripped = stripMeta(payload)
-      if (stripped && typeof stripped === 'object' && Number(stripped.errcode ?? 0) !== 0) {
-        throw new McpError(String(stripped.errmsg || `errcode ${stripped.errcode}`), Number(stripped.errcode))
+      if (stripped && typeof stripped === 'object') {
+        // 企微 MCP 有【两套】错误体系，只认 errcode 会漏掉一半：
+        //   A) 顶层 { errcode: 850003, errmsg: 'authorization expired' }   ← 老的
+        //   B) 套一层 { error: { code: 40058, message: '...' }, errcode: 0, errmsg: 'ok' } ← 新的
+        // B 这种 errcode 是 0、成功与否全靠 error.code，只看 errcode 就会把
+        // 「上传失败」当成功返回，上层拿到 undefined 再去用，错误被推迟到很远的地方。
+        // 实测 disk_files_upload 空参就返回 B 这种。
+        const inner = stripped.error
+        if (inner && typeof inner === 'object') {
+          const code = Number(inner.code ?? 0)
+          if (code !== 0) {
+            throw new McpError(String(inner.message || `error.code ${code}`), code)
+          }
+        }
+        if (Number(stripped.errcode ?? 0) !== 0) {
+          throw new McpError(String(stripped.errmsg || `errcode ${stripped.errcode}`), Number(stripped.errcode))
+        }
       }
       return stripped
     }

@@ -12,7 +12,6 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs'
 import { join, dirname, basename, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
 import { createHash, randomUUID } from 'node:crypto'
 
 import { loadConfig, saveConfig, publicConfig, merge, DATA_DIR } from './core/config.js'
@@ -47,7 +46,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PKG = (() => { try { return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) } catch { return { version: '?' } } })()
 const VERSION = PKG.version
 const PREFIX = '/wecom-bot/api'
-const nodeRequire = createRequire(import.meta.url)
 
 /** existsSync 的静默版：沙箱没权限时当不存在处理，别把面板请求打挂 */
 const safeExists = (p) => { try { return existsSync(p) } catch { return false } }
@@ -492,14 +490,14 @@ export function apply(ctx) {
     // 群里的文件不接（老大定的）—— 群文件多是共享资料，收下来既占地方又容易跑偏。
     const groupFile = chat.kind === 'group' && message.msgtype === 'file'
     if (message.msgtype === 'image') {
-      await attachInboundImage(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
+      await attachInboundImage(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
     } else if (message.msgtype === 'video') {
-      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
+      await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
     } else if (message.msgtype === 'file') {
       if (groupFile) {
         message.text = '[文件] 群里发的文件我不收，需要我看的话私聊发我'
       } else {
-        await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t), requireFn: nodeRequire })
+        await attachInboundFile(message.raw, message, { log: (lv, t) => log[lv]?.(t) })
       }
     }
 
@@ -986,7 +984,7 @@ export function apply(ctx) {
       const { describeImage, sniffImageMime } = await import('./wecom/media.js')
       const mime = sniffImageMime(buffer) || ''
       if (!mime) return { ok: false, message: '这不是一张能识别的图片（坏了或者扩展名不对）' }
-      preview = await describeImage(buffer, mime, nodeRequire)
+      preview = await describeImage(buffer, mime)
     } catch (error) {
       // 预演本身出错不该挡住上传（可能只是 sharp 没装好）。
       // 这种情况预览为空，面板就不显示那句说明，图照常存。
@@ -1021,7 +1019,7 @@ export function apply(ctx) {
         const { describeImage, sniffImageMime } = await import('./wecom/media.js')
         const buf = readFileSync(path)
         const mime = sniffImageMime(buf) || ''
-        if (mime) preview = await describeImage(buf, mime, nodeRequire)
+        if (mime) preview = await describeImage(buf, mime)
       } catch (error) {
         log.debug(`占位图状态预演失败：${error.message}`)
       }

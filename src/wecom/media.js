@@ -12,6 +12,7 @@
 //   2. 解不出真内容就返回 undefined，绝不把密文当图片/文件喂给下游（否则模型会「看到」一张乱码图）
 
 import { createDecipheriv } from 'node:crypto'
+import { tryRequire } from '../core/deps.js'
 
 /** 密钥候选：官方口径 aeskey = base64(32 字节 key)；另把原串 / 补 '==' / hex / utf8 截 32 都试一遍 */
 export function mediaKeys(aeskey) {
@@ -200,12 +201,22 @@ const IMAGE_FIT_TARGET = 1_400_000
  * 明说发不出去，比让人干等更诚实。
  */
 const COMPRESS_BUDGET_MS = 8000
+// 能不能压图只取决于「这台机器上有没有 sharp」，跟调用方在哪个目录无关。
+// 以前要每个调用点各传一个 require 函数进来，而且结论只探一次就写死：
+// host.js 传的 createRequire(import.meta.url) 从 src/ 往外找，插件自己没有
+// node_modules，于是第一次调用就把 sharpLib 钉死成 undefined，之后连出站那
+// 边传了正确 require 的调用也一起失效 —— 面板预告、入站、出站三处全废。
+// 现在默认走 deps.tryRequire（自己会翻插件目录、DSH profiles、cwd），
+// 只有测试要注入假 sharp 时才显式传一个函数进来（传了就每次现调，不缓存）。
 let sharpLib
 let sharpProbed = false
 function getSharp(requireFn) {
+  if (typeof requireFn === 'function') {
+    try { return requireFn('sharp') } catch { return undefined }
+  }
   if (sharpProbed) return sharpLib
   sharpProbed = true
-  try { sharpLib = requireFn ? requireFn('sharp') : undefined } catch { sharpLib = undefined }
+  try { sharpLib = tryRequire('sharp') } catch { sharpLib = undefined }
   return sharpLib
 }
 
@@ -238,7 +249,7 @@ async function fitAnimatedToBudget(sharp, buffer, mimeType, budgetMsOverride) {
   }
   const pages = Number(meta.pages || 1)
   if (pages <= 1) return null
-  const delays = await readDelays(buffer, pages)
+  const delays = await readDelays(buffer, pages, sharp)
 
   // 为什么这个顺序（先高质量、失败再降）：
   //   用户选表情包是为了「会动」，两帧一闪而过就不算动图了。
@@ -391,10 +402,18 @@ async function fitAnimatedToBudget(sharp, buffer, mimeType, budgetMsOverride) {
   return null
 }
 
-/** 读出每帧原始延时（毫秒），读不到就给 100ms */
-async function readDelays(buffer, pages) {
+/**
+ * 读出每帧原始延时（毫秒），读不到就给 100ms。
+ *
+ * sharp 必须显式传进来：以前这里读的是模块级变量 sharpLib，而 sharpLib 只在
+ * 「不传 requireFn」那条分支被赋值 —— 谁要是显式传了 require 函数（测试就这么干），
+ * sharpLib 就一直空着，这里悄悄退回「每帧 100ms」的默认值。
+ * 后果很隐蔽：造图用的 80ms/帧 被当成 100ms/帧，算出来的「压缩后总时长」凭空多出
+ * 25%，看起来像压缩把动画改速了，其实是读数错了。
+ */
+async function readDelays(buffer, pages, sharp) {
   try {
-    const meta = await sharpLib(buffer, { animated: true }).metadata()
+    const meta = await sharp(buffer, { animated: true }).metadata()
     if (Array.isArray(meta.delay) && meta.delay.length) return meta.delay
   } catch {}
   return Array(pages).fill(100)
@@ -495,7 +514,7 @@ export async function describeImage(buffer, mimeType, requireFn, opts = {}) {
     return null
   }
   const pages = Number(meta.pages || 1)
-  const delays = pages > 1 ? await readDelays(buffer, pages) : []
+  const delays = pages > 1 ? await readDelays(buffer, pages, sharp) : []
   const durationMs = delays.reduce((a, b) => a + (b || 0), 0)
   Object.assign(base, {
     width: meta.width || 0,
@@ -522,7 +541,7 @@ export async function describeImage(buffer, mimeType, requireFn, opts = {}) {
   let fm = null
   try { fm = await sharp(fit.data, { animated: true }).metadata() } catch {}
   const fPages = Number(fm?.pages || 1)
-  const fDelays = fPages > 1 ? await readDelays(fit.data, fPages) : []
+  const fDelays = fPages > 1 ? await readDelays(fit.data, fPages, sharp) : []
   const fDur = fDelays.reduce((a, b) => a + (b || 0), 0)
 
   Object.assign(base, {

@@ -16,7 +16,6 @@
 
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
-import { tryRequire } from '../core/deps.js'
 import { asLog } from '../core/safe.js'
 
 /** 单文件上限：草稿里定 20 MB，base64 后约 27 MB，还在 MCP 请求体承受范围内 */
@@ -77,12 +76,11 @@ export async function uploadMedia({ buffer, fileName, type = 'file' }, { mcpFor,
       const { fitImageToBudget, sniffImageMime, imageExt } = await import('./media.js')
       const mime = sniffImageMime(data)
       if (mime) {
-        // 以前这里取的是 globalThis.__wecomRequire —— 全项目从来没给它赋过值，
-        // 于是 getSharp() 恒为 undefined，出站图片永远不压缩（入站方向传的是
-        // 真的 nodeRequire，所以只有出站不正常，很难发现）。
-        // 改用 deps.tryRequire：自己会依次找插件 node_modules、DSH profiles、cwd，
-        // 找不到返回 undefined，fitImageToBudget 那边会优雅降级（原样返回）。
-        const fit = await fitImageToBudget(data, mime, (n) => tryRequire(n))
+        // 不传 require 函数：media.js 内部默认走 deps.tryRequire，
+        // 自己会依次找插件 node_modules、DSH profiles、cwd。
+        // 以前这里取 globalThis.__wecomRequire（从未赋值），后来又各传各的
+        // nodeRequire/tryRequire —— 每个调用点一份解析逻辑，漏一处就整条链路失效。
+        const fit = await fitImageToBudget(data, mime)
         if (fit.overBudget) {
           // 压到极限还是超预算：拒绝，别传上去赌企微会不会收。
           // 赌输的代价是「用户以为配好了图，对面永远收不到」，而他无从察觉。

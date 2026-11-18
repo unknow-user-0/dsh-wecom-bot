@@ -59,7 +59,7 @@ export function normalizeInbound(frame) {
  * @param {object} raw 回调 body
  * @param {object} message normalizeInbound 的结果（就地改 images / text）
  */
-export async function attachInboundImage(raw, message, { log = () => {}, requireFn } = {}) {
+export async function attachInboundImage(raw, message, { log = () => {} } = {}) {
   const image = raw.image || {}
   const url = typeof image.url === 'string' ? image.url : ''
   const aeskey = typeof image.aeskey === 'string' ? image.aeskey : ''
@@ -77,7 +77,7 @@ export async function attachInboundImage(raw, message, { log = () => {}, require
     if (plain === undefined) { fail(`解密失败 ${cipher.length} 字节`); return }
     const mimeType = sniffImageMime(plain) ?? 'image/png'
     const msgid = message.msgid || 'image'
-    const fitted = await fitImageToBudget(plain, mimeType, requireFn)
+    const fitted = await fitImageToBudget(plain, mimeType)
     message.images = [{ name: `${msgid}${imageExt(fitted.mimeType)}`, data: new Uint8Array(fitted.data), mimeType: fitted.mimeType }]
     message.text = '[图片]'
     log('info', `入站图片已就绪（${fitted.mimeType}，${fitted.data.length} 字节${fitted.data.length !== plain.length ? `，原图 ${plain.length} 字节已压缩` : ''}）`)

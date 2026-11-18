@@ -28,13 +28,40 @@ import { asLog, fireAndForget, messageOf } from '../core/safe.js'
 const DEFAULT_TEXT = 'emmm...'
 /** media_id 缓存：同一张图别每条消息都重传一遍 */
 const MEDIA_TTL_MS = 30 * 60 * 1000
-/** 发图失败（比如没配 MCP）后冷却，别每条消息都试一遍把日志刷满 */
-const FAIL_COOLDOWN_MS = 10 * 60 * 1000
+/**
+ * 失败冷却：别每条消息都去读一遍大图、压一遍、再失败一次。
+ *
+ * 但冷却时长必须看错误性质，一刀切是错的：
+ *   · 图本身有问题（太大 / 格式不对）→ 换张图才能好，冷却久点没损失
+ *   · 外部一时抽风（授权过期、网络、限流）→ 用户可能自己就修好了
+ *     （实测：企微授权过期 850003，用户点完授权当场就好了，
+ *      而我们还在静默 10 分钟，他发消息没图，只当插件坏了）
+ */
+const COOLDOWN_LOCAL_MS = 10 * 60 * 1000   // 确定性错误：图的问题
+const COOLDOWN_REMOTE_MS = 30 * 1000       // 瞬时错误：等下一次就重试
 
-export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw }) {
+/**
+ * 判断这次失败是「我们自己/图的问题」还是「外面一时不顺」。
+ *
+ * 判错的方向很重要：宁可短冷却多试几次，也别让用户修好了还发不出去。
+ * 反过来的代价只是多花几毫秒读一次图。
+ */
+export function isRemoteFailure(error) {
+  const text = messageOf(error)
+  const code = Number(error?.code ?? error?.errcode ?? NaN)
+  // 企微侧错误码：850003 授权过期、40001/42001 token 失效、45009 限流、
+  // 60020 IP 不在白名单、-1 系统繁忙
+  if ([850003, 40001, 42001, 45009, 60020, -1].includes(code)) return true
+  return /authorization expired|授权|过期|限流|rate limit|too many|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network|socket|socket hang up/i.test(text)
+}
+
+export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, cooldowns }) {
   // 外面传 logger 对象（host.js 传的就是 logger.child()）还是 (level, text) 函数都能吃。
   // 以前这里直接按函数调 log?.(...)，而 host 传的是对象 → TypeError。
   const log = asLog(logRaw)
+  // 只给测试用：真实冷却动辄几分钟，测试要能在毫秒级里观察「到点有没有恢复」
+  const coolLocal = cooldowns?.local ?? COOLDOWN_LOCAL_MS
+  const coolRemote = cooldowns?.remote ?? COOLDOWN_REMOTE_MS
   let cached = null // { key, mediaId, at }
   let failUntil = 0
   let failReason = ''
@@ -71,10 +98,15 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw })
   }
 
   async function sendImage(client, chat, path) {
-    if (Date.now() < failUntil) return // 冷却中，别再撞一遍
+    // 冷却中直接返回。注意：这里【必须】写日志 —— 以前静默 return，
+    // 用户发了消息没图，日志里也一行都没有，谁都查不出为什么。
+    if (Date.now() < failUntil) {
+      log('debug', `占位图冷却中，还剩 ${Math.ceil((failUntil - Date.now()) / 1000)} 秒（上次失败：${failReason}）`)
+      return
+    }
     if (!isImagePath(path)) {
       failReason = `占位图不是图片格式：${extname(path)}`
-      failUntil = Date.now() + FAIL_COOLDOWN_MS
+      failUntil = Date.now() + coolLocal
       log('warn', failReason)
       return
     }
@@ -100,10 +132,14 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw })
       failReason = ''
     } catch (error) {
       failReason = messageOf(error)
-      failUntil = Date.now() + FAIL_COOLDOWN_MS
-      // 图太大被拒不属于「配置坏了」，用户改张图就好，所以提示要给出路。
-      // 冷却照样设 —— 每条消息都去读一遍大图、压一遍、再失败一次，没必要。
-      log('warn', `占位图没发出去：${failReason}（${FAIL_COOLDOWN_MS / 60000} 分钟内不再重试）`)
+      const remote = isRemoteFailure(error)
+      const cooldown = remote ? coolRemote : coolLocal
+      failUntil = Date.now() + cooldown
+      // 瞬时故障多发一次 warn 带秒数，用户看日志就知道「等下会重试」；
+      // 图本身的问题才是真需要人去处理，所以也说清换图就能好。
+      log('warn', `占位图没发出去：${failReason}`
+        + `（${remote ? '外部一时不通' : '这张图本身发不了'}，${Math.round(cooldown / 1000)} 秒内不再重试）`
+        + (remote ? '' : ' 换一张图就能恢复。'))
     }
   }
 

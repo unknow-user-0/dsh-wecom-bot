@@ -223,6 +223,94 @@ function failingMcp(reason = 'media_upload 失败：不支持该图片格式') {
 }
 
 // ---------------------------------------------------------------
+// ⑥ 冷却必须看错误性质，不能一刀切
+//
+// 真机踩过：企微授权过期（850003）导致发图失败 → 挂了 10 分钟冷却。
+// 用户点完授权当场就修好了，插件却还在静默 —— 他再发消息没有图，
+// 只当插件坏了；更糟的是那时候连日志都不写，谁都查不出来。
+// 所以：外部一时不通 → 短冷却（几秒后自动恢复）；
+//       图本身有问题 → 长冷却（反正换图才能好）。
+// ---------------------------------------------------------------
+{
+  const { isRemoteFailure } = await import('../src/chat/placeholder.js')
+
+  const remoteCases = [
+    [{ code: 850003, message: 'authorization expired' }, '850003 授权过期'],
+    [{ code: 45009 }, '45009 限流'],
+    [{ code: -1 }, '-1 系统繁忙'],
+    [new Error('fetch failed'), 'fetch failed'],
+    [new Error('socket hang up'), 'socket hang up'],
+    [new Error('request timed out'), 'timeout'],
+  ]
+  for (const [err, name] of remoteCases) {
+    check(isRemoteFailure(err) === true, `外部故障判为瞬时：${name}`)
+  }
+
+  const localCases = [
+    [new Error('media_upload 失败：不支持该图片格式'), '图片格式不支持'],
+    [{ code: 40058, message: 'file upload source is invalid' }, '参数错误'],
+    [new Error('这张图 7.8 MB 超过上限'), '图太大'],
+  ]
+  for (const [err, name] of localCases) {
+    check(isRemoteFailure(err) === false, `自身问题判为确定性：${name}`)
+  }
+}
+
+// ---------------------------------------------------------------
+// ⑦ 短冷却到点必须自动恢复（以前静默 10 分钟 = 用户以为坏了）
+// ---------------------------------------------------------------
+{
+  const { createPlaceholder } = await import('../src/chat/placeholder.js')
+  let fail = true
+  const client = fakeClient()
+  const mcp = {
+    async mcpFor(service) {
+      if (service !== 'disk') return null
+      return {
+        async call(name) {
+          if (name === 'media_upload') {
+            if (fail) throw Object.assign(new Error('authorization expired'), { code: 850003 })
+            return { media_id: 'MID_OK' }
+          }
+          return { errcode: 0 }
+        },
+      }
+    },
+  }
+  const logs = []
+  const ph = createPlaceholder({
+    getConfig: () => cfgWith({ placeholderImage: IMG }),
+    getClient: () => client,
+    mcpFor: mcp.mcpFor,
+    log: objectLogger(logs),
+    cooldowns: { local: 5000, remote: 400 }, // 把「瞬时」冷却压到 400ms 便于观察
+  })
+
+  ph.fire(frame('c1'), chat)
+  await sleep(150) // 还在 400ms 冷却窗口内
+  check(ph.lastImageError !== '', '第一枪：授权过期，记下了失败', ph.lastImageError)
+  const afterFirst = client.calls.send.length
+  check(afterFirst === 0, '第一枪：图没发出去')
+
+  // 冷却期内再发一次：不应该再去撞上传
+  ph.fire(frame('c2'), chat)
+  await sleep(80)
+  check(client.calls.send.length === afterFirst, '冷却期内不重复撞上传')
+  check(
+    logs.some((l) => l.level === 'debug' && /冷却中/.test(l.text)),
+    '冷却中会写日志（以前静默，用户和开发者都查不出原因）',
+  )
+
+  // 用户修好了授权，等冷却过去
+  fail = false
+  await sleep(300)
+  ph.fire(frame('c3'), chat)
+  await sleep(150)
+  check(client.calls.send.length + 1 > afterFirst || ph.lastImageError === '', '授权修好后冷却结束就能发出去', `send=${client.calls.send.length} err="${ph.lastImageError}"`)
+  check(ph.lastImageError === '', '成功一次之后失败原因被清掉', `"${ph.lastImageError}"`)
+}
+
+// ---------------------------------------------------------------
 // 收尾：这时候进程还活着，就说明没漏出 unhandledRejection
 // ---------------------------------------------------------------
 process.on('unhandledRejection', (error) => {
