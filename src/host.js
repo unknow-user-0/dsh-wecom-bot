@@ -582,6 +582,10 @@ export function apply(ctx) {
 
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
+  // 同一个会话的挂载必须串行：mountTools 在工具清单算完之前有 await，
+  // 两条消息同时进来会都读到「没挂过」，第二遍给同一批名字注册就全撞名，
+  // 而且它的 offs 是空的，会盖掉第一遍存下的注销器 —— 之后再也摘不掉。
+  const mountChain = new Map()
   async function toolsFor(level, chat) {
     const video = await videoReady
     // 浏览器操作是三档：admin（只有管理员私聊）/ all（管理员 + 所有私聊）/ off。
@@ -605,7 +609,7 @@ export function apply(ctx) {
     list.push(...video.ok)
     return list
   }
-  async function mountTools(agent, chat, level, sid) {
+  async function mountToolsNow(agent, chat, level, sid) {
     const list = await toolsFor(level, chat)
     const key = list.map((t) => t.name).sort().join(',') + '|' + level
     const prev = mounted.get(sid)
@@ -627,6 +631,17 @@ export function apply(ctx) {
       videoReport = { ...(videoReport || {}), mountFailed: failed }
     }
     mounted.set(sid, { agent, key, offs })
+  }
+  // 同一个会话排队挂，谁先算完谁先挂，后进来的看到的一定是已挂好的状态。
+  function mountTools(agent, chat, level, sid) {
+    const prev = mountChain.get(sid) || Promise.resolve()
+    const next = prev.then(() => mountToolsNow(agent, chat, level, sid)).catch((error) => {
+      log.warn(`挂工具失败：${error.message}`)
+    })
+    mountChain.set(sid, next)
+    // 队列跑空了就把这条链摘掉，不然会话越来越多会一直攒着
+    next.then(() => { if (mountChain.get(sid) === next) mountChain.delete(sid) })
+    return next
   }
 
   // ---------- 面板接口 ----------

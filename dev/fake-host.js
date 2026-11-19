@@ -92,8 +92,15 @@ export function createFakeHost(opts = {}) {
       async saveImage() { return { id: 'img-1' } },
     },
     // ---- tools ----
+    // 跟真的一模一样地挡同名注册：真 dsh-tools 的 NamedEntries.insert 遇同名直接抛
+    // 「tool "x" is already registered in this scope」。这里以前是静默覆盖，
+    // 于是「并发挂同一批工具」这个 bug 测试永远抓不到。
     tools: {
-      register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) },
+      register(tool) {
+        if (tools.has(tool.name)) throw new Error(`tool "${tool.name}" is already registered in this scope`)
+        tools.set(tool.name, tool)
+        return () => tools.delete(tool.name)
+      },
       restrict() { return () => {} },
     },
   }
