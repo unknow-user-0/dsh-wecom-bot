@@ -26,7 +26,7 @@
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
-              prefix: "{{wecom_persona}}\n\n{{wecom_rules_owner}}"
+              prefix: "{{wecom_persona}}\n\n{{wecom_rules_owner}}\n\n{{wecom_context}}"
               # 人格独占系统提示词：不带 DSH 那一大段编程助手身份和工具指南。
               # 工具照样挂着，模型靠工具定义本身就会用。
               complete: true
@@ -71,7 +71,7 @@
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
-              prefix: "{{wecom_persona}}\n\n{{wecom_rules_owner}}"
+              prefix: "{{wecom_persona}}\n\n{{wecom_rules_owner}}\n\n{{wecom_context}}"
               complete: true
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
@@ -118,7 +118,7 @@
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
-              prefix: "{{wecom_persona}}\n\n{{wecom_rules_social}}"
+              prefix: "{{wecom_persona}}\n\n{{wecom_rules_social}}\n\n{{wecom_context}}"
               complete: true
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'

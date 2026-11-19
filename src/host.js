@@ -293,16 +293,23 @@ export function apply(ctx) {
   }
 
   // ---------- 记忆上下文（每轮拼一小段）----------
+  // 这段必须挂进系统提示词才有用 —— cordis.patch.yml 三个 preset 的 prefix
+  // 里都要有 {{wecom_context}}，否则模型根本不知道自己有记性，tool 白挂。
+  //
+  // 空库也要注入：以前 `if (!s.total) return ''`，结果是「先有记忆才提示，
+  // 但没提示就永远不会有记忆」的死循环。
   function contextText() {
     try {
       if (!cfg.features.memory) return ''
       const s = memory.stats()
-      if (!s.total) return ''
-      return [
+      const lines = [
         '【你有记性】',
-                '你记得住谁说过什么（用 wecom_memory 主动回忆/记录）。',
+        `你有一个跨会话的记忆库（用 wecom_memory 主动记录和回忆）。现在里面有 ${s.alive} 条还没过期的。`,
+        '什么时候主动回忆：对方提到「上次」「之前说过」，或你在接一件没做完的事时，先 wecom_memory(recall) 查一下，别凭印象编。',
+        '什么时候主动记：对方的偏好、忌讳、身份、正在办的要紧事。不记一次性的闲聊、不记能自己查到的公开信息。',
         '召回时如果某条标注是从别的群/别的地方听来的，那件事不要当成当前这个群的公开信息到处讲。',
-      ].join('\n')
+      ]
+      return lines.join('\n')
     } catch { return '' }
   }
 

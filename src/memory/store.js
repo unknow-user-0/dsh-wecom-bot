@@ -54,7 +54,9 @@ let db = load()
 
 /** 鲜活度：0~1，越久越低 */
 function freshness(item, now = Date.now()) {
-  if (item.kind === 'ephemeral') {
+  // 字段名是 type 不是 kind —— add() 只写 type。以前这里和 alive()/stats() 三处
+  // 都写成 item.kind，那是个永远 undefined 的字段，于是 ephemeral 永不过期。
+  if (item.type === 'ephemeral') {
     if (!item.expiresAt) return 1
     return now < item.expiresAt ? 1 : 0
   }
@@ -68,7 +70,7 @@ function freshness(item, now = Date.now()) {
 function alive(item, now = Date.now()) {
   if (item.supersededAt) return false
   if (item.invalidAt) return false
-  if (item.kind === 'ephemeral' && item.expiresAt && now > item.expiresAt) return false
+  if (item.type === 'ephemeral' && item.expiresAt && now > item.expiresAt) return false
   // 太小的重要度 + 太久没被想起 → 归档
   if (item.archivedAt) return false
   return true
@@ -191,6 +193,15 @@ export function recall(query, o = {}) {
   for (const it of db.items) {
     if (!alive(it, now)) continue
 
+    // 硬门禁（不是加分，是「根本不该看见」）。
+    //
+    // 四层里 person 和 scene 是私密层，它们的隔离必须是硬约束：
+    // 以前只把它们做成加分项，于是词命中就能跨过隔离 —— 小李在私聊说过
+    // 「我胃不好」，别人在群里问「谁胃不好」照样能召回出来。分数再高，
+    // 泄露出去也是错的。这是隐私边界，不是排序偏好。
+    if (it.scope === 'person' && it.about && !aboutSet.has(String(it.about))) continue
+    if (it.scope === 'scene' && it.chatId && String(it.chatId) !== chatId) continue
+
     // 权重：场景匹配 > 关于这个人 > 词命中
     let score = 0
     const why = []
@@ -226,10 +237,13 @@ export function recall(query, o = {}) {
   scored.sort((a, b) => b.score - a.score)
   const top = scored.slice(0, limit)
   for (const h of top) h.it.hits = (h.it.hits || 0) + 1
-  if (top.length) save(db)
 
+  // 召回日志也要落盘，所以 save 必须放在这行之后。
+  // 以前是先 save(db)、再 unshift —— 日志只活在内存里，重启就没了，
+  // 表现就是「recallLog 永远是空的，到底有没有召回根本查不了」。
   db.recallLog.unshift({ at: now, query: q.slice(0, 120), hits: top.map((h) => ({ id: h.it.id, text: h.it.text, score: Number(h.score.toFixed(2)) })) })
   if (db.recallLog.length > 200) db.recallLog.length = 200
+  save(db)
 
   return top
 }
@@ -275,7 +289,7 @@ export function stats() {
     alive: alive_.length,
     archived: db.items.filter((m) => m.archivedAt).length,
     superseded: db.items.filter((m) => m.supersededAt).length,
-    expired: db.items.filter((m) => m.kind === 'ephemeral' && m.expiresAt && now > m.expiresAt).length,
+    expired: db.items.filter((m) => m.type === 'ephemeral' && m.expiresAt && now > m.expiresAt).length,
     byScope: {
       person: alive_.filter((m) => m.scope === 'person').length,
       scene: alive_.filter((m) => m.scope === 'scene').length,
