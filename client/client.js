@@ -178,6 +178,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 .wb-tag.err{background:rgba(207,34,46,.10);border-color:rgba(207,34,46,.24);color:var(--wb-err)}
 .wb-tag.brand{background:var(--wb-tint);border-color:var(--wb-tint-2);color:var(--wb-deep)}
 .wb-muted{color:var(--wb-sub)}.wb-dim{color:var(--wb-dim)}.wb-small{font-size:12px}.wb-err{color:var(--wb-err)}
+.wb-note{margin:0;padding:9px 11px;border-radius:9px;border:1px solid var(--wb-warn);background:rgba(191,135,0,.08);color:var(--wb-warn);font-size:12px;line-height:1.7}
 .wb-tipwrap{position:relative;display:inline-flex;align-items:center;vertical-align:middle}
 .wb-tipbtn{flex:none;display:inline-grid;place-items:center;width:15px;height:15px;margin-left:5px;padding:0;border-radius:50%;border:1px solid var(--wb-line-2);background:transparent;color:var(--wb-dim);cursor:pointer;line-height:1;transition:color .15s,border-color .15s}
 .wb-tipbtn:hover,.wb-tipwrap.open .wb-tipbtn{color:var(--wb-brand);border-color:var(--wb-brand)}
@@ -465,8 +466,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         h(Access, P))
     }
 
-    // 自我 = 角色卡 + 记忆
-    // 角色卡决定它怎么说话，记忆决定它记得什么 —— 都是「它是谁」的一部分。
+    // 自我 = 人格 + 记忆
+    // 人格决定它怎么说话，记忆决定它记得什么 —— 都是「它是谁」的一部分。
     // 而且记忆开关原本在功能页，开关和它控制的东西隔着一格，早就该搬过来。
     function SelfTab(P) {
       return h('div', { className: 'wb-page' },
@@ -545,7 +546,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Btn, { kind: 'primary', onClick: () => void doConnect(), disabled: busy || !botId.trim() }, busy ? '连接中…' : '保存并连接'),
             h(Btn, { kind: 'ghost', onClick: async () => { await post('/disconnect'); toast('已断开', 'ok'); void reload() } }, '断开'),
             h('span', { className: cx('wb-tag', st.connected ? 'ok' : 'err') }, st.connected ? '当前：已连接' : '当前：' + (st.reason || '没连上')))),
-        h(Card, { title: '机器人名字与长任务', hint: '名字只用来去掉群消息开头的「@名字」，不再告诉模型「你叫什么」——身份由角色卡决定。所以这里填错也不影响它认自己，只影响它认不认得别人是在叫它。长任务档位会多挂后台任务和定时任务工具。' },
+        h(Card, { title: '机器人名字与长任务', hint: '名字只用来去掉群消息开头的「@名字」，不再告诉模型「你叫什么」——身份由人格决定。所以这里填错也不影响它认自己，只影响它认不认得别人是在叫它。长任务档位会多挂后台任务和定时任务工具。' },
           h('div', { className: 'wb-grid' },
             h(Field, { label: '企微里 @ 它用的名字' },
               h('input', { className: 'wb-input', value: cfg.botName || '', placeholder: '和企业微信后台显示名保持一致', onChange: (e) => setD('botName', e.target.value) })),
@@ -749,15 +750,15 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           '留空用默认 %USERPROFILE%\\WeComBot\\chats。迁移只改 DSH 会话放哪，不影响企微那边任何设置。'))
     }
 
-    // ---------------- 角色卡 ----------------
+    // ---------------- 人格 ----------------
+    // 只有一件事：面前这一份人格文本，改完保存。
+    // 以前做成「多张角色卡 + 新建 + 另存为 + 删除」，结果每个人都把「改名」理解成
+    // 「存成另一张」，保存一次原卡就没了 —— 多余的能力自己制造了困惑。
     function Persona({ cfg, draft, setD, toast, reload }) {
       const [rows, setRows] = useState([])
       const [cur, setCur] = useState(null)
       const [text, setText] = useState('')
       const [name, setName] = useState('')
-      const [fresh, setFresh] = useState('')
-      const [copyAs, setCopyAs] = useState('')
-      const [busy, setBusy] = useState(false)
       const load = useCallback(async () => {
         const r = await get('/personas')
         if (r?.ok) setRows(r.rows || [])
@@ -769,70 +770,29 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         })
       }, [draft.persona?.current])
       const pick = async (id) => { setD('persona.current', id) }
-      // 「保存」永远是覆盖当前这张（按 id = 文件名定位），不会变成新的一张。
-      // 想留下原件就用下面的「另存为」。
       const saveP = async () => {
         if (!cur) return
         const r = await post('/persona/save', { id: cur.id, name: name || cur.name, body: text, select: true })
-        if (r?.ok) { toast('已覆盖这张角色卡', 'ok'); void load(); void reload() }
+        if (r?.ok) { toast('人格已保存', 'ok'); void load(); void reload() }
         else toast(r?.message || '保存失败', 'err')
       }
-      const makeNew = async () => {
-        const id = fresh.trim()
-        if (!id) { toast('先起个 id', 'err'); return }
-        setBusy(true)
-        const r = await post('/persona/create', { id, name: id, body: '' })
-        setBusy(false)
-        if (r?.ok) { setFresh(''); toast('建好了一张空白卡', 'ok'); void load(); setD('persona.current', r.id) }
-        else toast(r?.message || '新建失败', 'err')
-      }
-      // 另存为：把编辑区当前的内容写到一个新 id 下，原卡不动。
-      // 这是「改标题本该新建一张」那个误解的正确出口。
-      const copyTo = async () => {
-        const id = copyAs.trim()
-        if (!id) { toast('先给副本起个 id', 'err'); return }
-        if (rows.some((p) => p.id === id)) { toast('这个 id 已经有一张了', 'err'); return }
-        setBusy(true)
-        const r = await post('/persona/create', { id, name: name || id, body: text })
-        setBusy(false)
-        if (r?.ok) { setCopyAs(''); toast('已另存为一张新卡，原卡没动', 'ok'); void load(); setD('persona.current', r.id) }
-        else toast(r?.message || '另存失败', 'err')
-      }
-      const drop = async (id) => {
-        const r = await post('/persona/delete', { id })
-        if (r?.ok) { toast('删了（备份留在 personas/.trash）', 'ok'); void load(); void reload() }
-        else toast(r?.message || '删不掉', 'err')
-      }
-      // 换角色卡时提醒去企微后台改名 —— 我们改不了那边的名字（企微不开放这个接口），
-      // 但名字不一致不会让模型认知错乱（名字已经不进系统提示了），只是别人 @ 它时会觉得对不上。
-      const switched = cur && cur.id !== 'default' && (cfg.botName || '').trim() === ''
       return h('div', { className: 'wb-sect' },
-        h(Card, { title: '选角色卡', hint: '角色卡就是系统提示词的前半段，决定它是谁、怎么说话。改完下一轮就生效，不用重启。' },
-          rows.length
-            ? h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
-              h('span', { className: cx('wb-tag', p.id === draft.persona?.current && 'brand') }, p.id === draft.persona?.current ? '在用' : '可选'),
-              h('div', { className: 'main' }, h('div', { className: 't' }, p.name), h('div', { className: 'd' }, p.id + ' · ' + (p.tags || []).join(' / '))),
-              h(Btn, { sm: true, onClick: () => void pick(p.id) }, '用它'),
-              h(Btn, { sm: true, kind: 'ghost', onClick: () => void drop(p.id) }, '删'))))
-            : h(Empty, null, '没有角色卡文件。')),
-        h(Card, { title: '新建一张', hint: 'id 只能用字母、数字、下划线、短横线，建完在下面写正文。' },
-          h('div', { className: 'wb-row' },
-            h('input', { className: 'wb-input', style: { maxWidth: 260 }, value: fresh, placeholder: '比如 bt7274', onChange: (e) => setFresh(e.target.value) }),
-            h(Btn, { onClick: () => void makeNew(), disabled: busy || !fresh.trim() }, '新建'))),
-        cur ? h(Card, { title: '编辑：' + cur.id, hint: '这张卡的身份就是它的 id（' + cur.id + '），标题只是显示用，改了也不会变成另一张。保存 = 覆盖它。' },
+        h(Card, { title: '写人格', hint: '人格就是系统提示词的前半段，决定它是什么脾气、怎么说话。改完下一轮就生效，不用重启。' },
+          h('div', { className: 'wb-note' },
+            '别在人格里写「我叫XX」「我是XX」这类自我介绍。企微里别人 @ 的是另一个名字，两个名字同时存在，它会分不清自己是谁，回答就开始乱。名字交给企业微信那边管，人格只管性格和说话方式。')),
+        rows.length > 1 ? h(Card, { title: '选人格', hint: '几份人格文本里挑一份用。' },
+          h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
+            h('span', { className: cx('wb-tag', p.id === draft.persona?.current && 'brand') }, p.id === draft.persona?.current ? '在用' : '可选'),
+            h('div', { className: 'main' }, h('div', { className: 't' }, p.name), h('div', { className: 'd' }, p.id + ' · ' + (p.tags || []).join(' / '))),
+            h(Btn, { sm: true, onClick: () => void pick(p.id) }, '用它'))))) : null,
+        cur ? h(Card, { title: '编辑', hint: '这一份的身份就是它的 id（' + cur.id + '），标题只是显示用。保存 = 覆盖它，不会变成另一份。' },
           h('div', { className: 'wb-grid' },
-            h(Field, { label: '标题（显示用，不影响身份）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
+            h(Field, { label: '标题（显示用）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
           h('div', { style: { marginTop: 10 } },
             h('textarea', { className: 'wb-area', value: text, onChange: (e) => setText(e.target.value), spellCheck: false })),
           h('div', { className: 'wb-row', style: { marginTop: 10 } },
-            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存（覆盖这张）'),
-            h('span', { className: 'wb-dim wb-small' }, '内置的删不掉；想改就另存为一张新的。')),
-          h('div', { className: 'wb-row', style: { marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--wb-line, rgba(127,127,127,.18))' } },
-            h('span', { className: 'wb-dim wb-small' }, '想保住原件：'),
-            h('input', { className: 'wb-input', style: { maxWidth: 200 }, value: copyAs, placeholder: '新 id，比如 bt7274-v2', onChange: (e) => setCopyAs(e.target.value) }),
-            h(Btn, { onClick: () => void copyTo(), disabled: busy || !copyAs.trim() }, '另存为一张新卡'))) : null,
-        switched ? h('div', { className: 'wb-hint', style: { marginTop: 2 } },
-          '换了角色卡，记得去企业微信后台把这台机器人的名字也改一下 —— 我们改不了那边的名字。不改也能用：名字已经不进提示词了，只是群里别人 @ 它时看到的还是旧名字。') : null)
+            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存'),
+            h('span', { className: 'wb-dim wb-small' }, '内置的那份删不掉；想大改就把它整段改了保存。'))) : null)
     }
 
     // ---------------- 功能 ----------------
