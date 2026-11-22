@@ -1,7 +1,7 @@
 // 名字这件事的三条链路：
 //   1) 入站剥 @ 前缀（传输层，不进认知层）
 //   2) 系统提示里声明旧名字（历史消息里的残留 @ 不变成陌生人）
-//   3) 角色卡增删（以前删不掉、删完不切回、新建会静默覆盖同名卡）
+//   3) 人格增删（以前删不掉、删完不切回、新建会静默覆盖同名卡）
 //
 // 这三条以前都没测过。名字冲突是最容易「看着能用、群里就翻车」的地方，
 // 所以这里把边界钉死。
@@ -13,8 +13,8 @@ import { mkdtempSync, writeFileSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-// 角色卡测试必须在临时目录里跑 —— 以前直接打真实数据目录，
-// 一条断言写错就把用户手写的角色卡永久删掉了（unlinkSync 绕过回收站）。
+// 人格测试必须在临时目录里跑 —— 以前直接打真实数据目录，
+// 一条断言写错就把用户手写的人格永久删掉了（unlinkSync 绕过回收站）。
 setPersonasDir(mkdtempSync(join(tmpdir(), 'wecom-personas-')))
 
 let pass = 0
@@ -76,15 +76,15 @@ check('要求别主动提旧名字', r2.includes('内部信息'))
 console.log('\n⑦ 系统提示：没有别名时不出现那段')
 check('无别名不提改名', !rules.includes('以前在企业微信里叫过'))
 
-console.log('\n⑧ personaText：只有角色卡显式写了 {{name}} 才注入名字')
-// 内置角色卡第 6 行有「你是{{name}}」，所以配了名字就会被替换进去 —— 这是它的设计。
+console.log('\n⑧ personaText：只有人格显式写了 {{name}} 才注入名字')
+// 内置人格第 6 行有「你是{{name}}」，所以配了名字就会被替换进去 —— 这是它的设计。
 const withName = personaText({ persona: { current: 'default' }, botName: '海棠' })
 check('内置卡写了 {{name}}，会注入', withName.includes('你是海棠'), withName.slice(0, 120))
 const noName = personaText({ persona: { current: 'default' }, botName: '' })
 check('没配名字时 {{name}} 不会变成空字符串留个洞', !noName.includes('你是，'), noName.slice(0, 120))
 check('没配名字时兜底成「我」', noName.includes('你是我'), noName.slice(0, 120))
 
-console.log('\n⑨ 角色卡增删')
+console.log('\n⑨ 人格增删')
 const made = createPersona('test-card-1', { name: '测试卡', body: '我是测试卡的正文。' })
 check('能新建', made.ok === true, JSON.stringify(made))
 const dup = createPersona('test-card-1', { name: '又一个', body: 'x' })

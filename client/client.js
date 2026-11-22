@@ -751,14 +751,19 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 人格 ----------------
-    // 只有一件事：面前这一份人格文本，改完保存。
-    // 以前做成「多张角色卡 + 新建 + 另存为 + 删除」，结果每个人都把「改名」理解成
-    // 「存成另一张」，保存一次原卡就没了 —— 多余的能力自己制造了困惑。
+    // 可以存好几份，挑一份用。
+    //
+    // 「保存」永远只覆盖当前这份（按 id 定位）。以前按钮只写「保存人格」，很多人
+    // 以为改个标题再保存就是存成新的一份，结果原来那份被换掉了 —— 现在两条路都
+    // 摆明：改这份就保存，想留住原件就另存为。
     function Persona({ cfg, draft, setD, toast, reload }) {
       const [rows, setRows] = useState([])
       const [cur, setCur] = useState(null)
       const [text, setText] = useState('')
       const [name, setName] = useState('')
+      const [fresh, setFresh] = useState('')
+      const [copyAs, setCopyAs] = useState('')
+      const [busy, setBusy] = useState(false)
       const load = useCallback(async () => {
         const r = await get('/personas')
         if (r?.ok) setRows(r.rows || [])
@@ -776,23 +781,64 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         if (r?.ok) { toast('人格已保存', 'ok'); void load(); void reload() }
         else toast(r?.message || '保存失败', 'err')
       }
+      const makeNew = async () => {
+        const id = fresh.trim()
+        if (!id) { toast('先起个名字', 'err'); return }
+        setBusy(true)
+        const r = await post('/persona/create', { id, name: id, body: '' })
+        setBusy(false)
+        if (r?.ok) { setFresh(''); toast('建好了一份空白人格', 'ok'); void load(); setD('persona.current', r.id) }
+        else toast(r?.message || '新建失败', 'err')
+      }
+      // 另存为：把编辑区现在的内容写到新的一份下，原来那份不动。
+      const copyTo = async () => {
+        const id = copyAs.trim()
+        if (!id) { toast('先给副本起个名字', 'err'); return }
+        if (rows.some((p) => p.id === id)) { toast('这个名字已经有一份了', 'err'); return }
+        setBusy(true)
+        const r = await post('/persona/create', { id, name: name || id, body: text })
+        setBusy(false)
+        if (r?.ok) { setCopyAs(''); toast('已另存为一份新人格，原来那份没动', 'ok'); void load(); setD('persona.current', r.id) }
+        else toast(r?.message || '另存失败', 'err')
+      }
+      const drop = async (id) => {
+        const r = await post('/persona/delete', { id })
+        if (r?.ok) { toast('删了（备份留在 personas/.trash）', 'ok'); void load(); void reload() }
+        else toast(r?.message || '删不掉', 'err')
+      }
+      // 换人格时提醒去企微后台改名 —— 那边改不了名（企微不开放这个接口）。
+      // 不改也不会认知错乱，名字已经不进系统提示了，只是别人 @ 它时看到的还是旧名字。
+      const switched = cur && cur.id !== 'default' && (cfg.botName || '').trim() === ''
       return h('div', { className: 'wb-sect' },
-        h(Card, { title: '写人格', hint: '人格就是系统提示词的前半段，决定它是什么脾气、怎么说话。改完下一轮就生效，不用重启。' },
+        h(Card, { title: '人格里别写名字', hint: '' },
           h('div', { className: 'wb-note' },
-            '别在人格里写「我叫XX」「我是XX」这类自我介绍。企微里别人 @ 的是另一个名字，两个名字同时存在，它会分不清自己是谁，回答就开始乱。名字交给企业微信那边管，人格只管性格和说话方式。')),
-        rows.length > 1 ? h(Card, { title: '选人格', hint: '几份人格文本里挑一份用。' },
-          h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
-            h('span', { className: cx('wb-tag', p.id === draft.persona?.current && 'brand') }, p.id === draft.persona?.current ? '在用' : '可选'),
-            h('div', { className: 'main' }, h('div', { className: 't' }, p.name), h('div', { className: 'd' }, p.id + ' · ' + (p.tags || []).join(' / '))),
-            h(Btn, { sm: true, onClick: () => void pick(p.id) }, '用它'))))) : null,
-        cur ? h(Card, { title: '编辑', hint: '这一份的身份就是它的 id（' + cur.id + '），标题只是显示用。保存 = 覆盖它，不会变成另一份。' },
+            '别在人格里写「我叫XX」「我是XX」这类自我介绍。企微那边别人 @ 的是另一个名字，两个名字同时存在，它会分不清自己是谁，回答就开始乱。名字交给企业微信管，人格只管性格和说话方式。')),
+        h(Card, { title: '选人格', hint: '人格就是系统提示词的前半段，决定它是什么脾气、怎么说话。改完下一轮就生效，不用重启。' },
+          rows.length
+            ? h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
+              h('span', { className: cx('wb-tag', p.id === draft.persona?.current && 'brand') }, p.id === draft.persona?.current ? '在用' : '可选'),
+              h('div', { className: 'main' }, h('div', { className: 't' }, p.name), h('div', { className: 'd' }, p.id + ' · ' + (p.tags || []).join(' / '))),
+              h(Btn, { sm: true, onClick: () => void pick(p.id) }, '用它'),
+              h(Btn, { sm: true, kind: 'ghost', onClick: () => void drop(p.id) }, '删'))))
+            : h(Empty, null, '没有人格文件。')),
+        h(Card, { title: '新建一份', hint: '名字只能用字母、数字、下划线、短横线，建完在下面写正文。' },
+          h('div', { className: 'wb-row' },
+            h('input', { className: 'wb-input', style: { maxWidth: 260 }, value: fresh, placeholder: '比如 bt7274', onChange: (e) => setFresh(e.target.value) }),
+            h(Btn, { onClick: () => void makeNew(), disabled: busy || !fresh.trim() }, '新建'))),
+        cur ? h(Card, { title: '编辑：' + cur.id, hint: '这一份的身份就是它的 id（' + cur.id + '），标题只是显示用，改了也不会变成另一份。保存 = 覆盖它。' },
           h('div', { className: 'wb-grid' },
-            h(Field, { label: '标题（显示用）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
+            h(Field, { label: '标题（显示用，不影响身份）' }, h('input', { className: 'wb-input', value: name, onChange: (e) => setName(e.target.value) }))),
           h('div', { style: { marginTop: 10 } },
             h('textarea', { className: 'wb-area', value: text, onChange: (e) => setText(e.target.value), spellCheck: false })),
           h('div', { className: 'wb-row', style: { marginTop: 10 } },
-            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存'),
-            h('span', { className: 'wb-dim wb-small' }, '内置的那份删不掉；想大改就把它整段改了保存。'))) : null)
+            h(Btn, { kind: 'primary', onClick: () => void saveP() }, '保存（覆盖这一份）'),
+            h('span', { className: 'wb-dim wb-small' }, '内置的那份删不掉；想大改就另存为一份新的。')),
+          h('div', { className: 'wb-row', style: { marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--wb-line, rgba(127,127,127,.18))' } },
+            h('span', { className: 'wb-dim wb-small' }, '想保住原件：'),
+            h('input', { className: 'wb-input', style: { maxWidth: 200 }, value: copyAs, placeholder: '新名字，比如 bt7274-v2', onChange: (e) => setCopyAs(e.target.value) }),
+            h(Btn, { onClick: () => void copyTo(), disabled: busy || !copyAs.trim() }, '另存为一份新人格'))) : null,
+        switched ? h('div', { className: 'wb-hint', style: { marginTop: 2 } },
+          '换了人格，记得去企业微信后台把这台机器人的名字也改一下 —— 那边改不了我们就改不了。不改也能用：名字已经不进提示词了，只是群里别人 @ 它时看到的还是旧名字。') : null)
     }
 
     // ---------------- 功能 ----------------
