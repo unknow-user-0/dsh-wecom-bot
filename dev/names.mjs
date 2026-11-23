@@ -59,10 +59,17 @@ eq('只 @ 不说话', normalizeInbound(onlyAt, { botName: '海棠' }).text, '[�
 const imgFrame = { body: { chattype: 'group', chatid: 'g1', from: { userid: 'u1' }, msgtype: 'image' }, headers: {} }
 eq('图片消息不做剥离', normalizeInbound(imgFrame, { botName: '海棠' }).text, '[图片]')
 
-console.log('\n⑤ 系统提示：不再说「你叫 X」')
+console.log('\n⑤ 系统提示：名字是门牌，不是身份')
+// 不能说「你叫 X」（身份句式，跟人格里的自称平级，会打架），
+// 但也不能把名字整个捂住 —— 别人喊海棠它得知道在喊自己。
 const base = merge(DEFAULTS, { admins: [{ userid: 'u1', name: '季游' }], botName: '海棠', botNameAliases: [] })
 const rules = rulesText('owner', base)
-check('没有「你叫「海棠」」这种句子', !/你叫「?海棠/.test(rules), rules.slice(0, 200))
+check('没有「你叫「海棠」」这种身份句式', !/你叫「?海棠/.test(rules), rules.slice(0, 200))
+check('把企微名字说成门牌', rules.includes('那是你的门牌'), rules.slice(0, 300))
+check('明说门牌不等于住户', rules.includes('门牌不等于住户'))
+check('被问「海棠是谁」时知道怎么答', rules.includes('有人问「海棠是谁」'))
+check('别人喊名字要答应，别解释', rules.includes('正常答应，不用解释'))
+check('别主动聊两个名字', rules.includes('别主动跟人聊'))
 check('说明 @ 前缀已替它去过', rules.includes('我们已经替你去掉了'))
 check('说明残留 @ 是在说别人', rules.includes('那是在说别人'))
 
@@ -75,6 +82,9 @@ check('要求别主动提旧名字', r2.includes('内部信息'))
 
 console.log('\n⑦ 系统提示：没有别名时不出现那段')
 check('无别名不提改名', !rules.includes('以前在企业微信里叫过'))
+const noNameCfg = merge(DEFAULTS, { admins: [{ userid: 'u1', name: '季游' }], botName: '', botNameAliases: [] })
+const noNameRules = rulesText('owner', noNameCfg)
+check('没配名字时整段门牌说明都不出现', !noNameRules.includes('那是你的门牌'), noNameRules.slice(0, 200))
 
 console.log('\n⑧ personaText：只有人格显式写了 {{name}} 才注入名字')
 // 内置人格第 6 行有「你是{{name}}」，所以配了名字就会被替换进去 —— 这是它的设计。

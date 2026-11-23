@@ -546,7 +546,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Btn, { kind: 'primary', onClick: () => void doConnect(), disabled: busy || !botId.trim() }, busy ? '连接中…' : '保存并连接'),
             h(Btn, { kind: 'ghost', onClick: async () => { await post('/disconnect'); toast('已断开', 'ok'); void reload() } }, '断开'),
             h('span', { className: cx('wb-tag', st.connected ? 'ok' : 'err') }, st.connected ? '当前：已连接' : '当前：' + (st.reason || '没连上')))),
-        h(Card, { title: '机器人名字与长任务', hint: '名字只用来去掉群消息开头的「@名字」，不再告诉模型「你叫什么」——身份由人格决定。所以这里填错也不影响它认自己，只影响它认不认得别人是在叫它。长任务档位会多挂后台任务和定时任务工具。' },
+        h(Card, { title: '机器人名字与长任务', hint: '这个名字有两个用处：把群消息开头的「@名字」去掉，以及告诉模型「别人用这个称呼喊你」。它是门牌，不是身份 —— 身份由「自我」页的人格决定，两者同时存在不冲突。填错的话，别人 @ 它它可能认不出来。长任务档位会多挂后台任务和定时任务工具。' },
           h('div', { className: 'wb-grid' },
             h(Field, { label: '企微里 @ 它用的名字' },
               h('input', { className: 'wb-input', value: cfg.botName || '', placeholder: '和企业微信后台显示名保持一致', onChange: (e) => setD('botName', e.target.value) })),
@@ -810,9 +810,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       // 不改也不会认知错乱，名字已经不进系统提示了，只是别人 @ 它时看到的还是旧名字。
       const switched = cur && cur.id !== 'default' && (cfg.botName || '').trim() === ''
       return h('div', { className: 'wb-sect' },
-        h(Card, { title: '人格里别写名字', hint: '' },
+        h(Card, { title: '人格和企微名字的关系', hint: '' },
           h('div', { className: 'wb-note' },
-            '别在人格里写「我叫XX」「我是XX」这类自我介绍。企微那边别人 @ 的是另一个名字，两个名字同时存在，它会分不清自己是谁，回答就开始乱。名字交给企业微信管，人格只管性格和说话方式。')),
+            '这里写它真正是谁 —— 想怎么写名字就怎么写。企微那边的名字只是门牌：别人用那个喊它，它答应；问它是谁，它还是答这里的自己。门牌和住户同时存在不矛盾，不用为了统一而删掉哪一边。')),
         h(Card, { title: '选人格', hint: '人格就是系统提示词的前半段，决定它是什么脾气、怎么说话。改完下一轮就生效，不用重启。' },
           rows.length
             ? h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
@@ -838,7 +838,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h('input', { className: 'wb-input', style: { maxWidth: 200 }, value: copyAs, placeholder: '新名字，比如 bt7274-v2', onChange: (e) => setCopyAs(e.target.value) }),
             h(Btn, { onClick: () => void copyTo(), disabled: busy || !copyAs.trim() }, '另存为一份新人格'))) : null,
         switched ? h('div', { className: 'wb-hint', style: { marginTop: 2 } },
-          '换了人格，记得去企业微信后台把这台机器人的名字也改一下 —— 那边改不了我们就改不了。不改也能用：名字已经不进提示词了，只是群里别人 @ 它时看到的还是旧名字。') : null)
+          '换了人格，记得去企业微信后台把这台机器人的名字也改一下 —— 那边改不了我们就改不了。不改也能用：门牌还是旧的，别人喊旧名字它照样答应，只是和你现在写的人格看起来对不上。') : null)
     }
 
     // ---------------- 功能 ----------------
