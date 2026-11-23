@@ -14,7 +14,7 @@
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
-import { DATA_DIR } from '../core/config.js'
+import { DATA_DIR, isOwner } from '../core/config.js'
 
 const MAP_FILE = join(DATA_DIR, 'sessions.json')
 
@@ -106,14 +106,14 @@ export function createHub({ ctx, log, getConfig }) {
 
   /**
    * 权限档位：
-   *   owner  — 管理员私聊（完整工具）
-   *   social — 群聊 / 白名单成员私聊（只有社交工具）
+   *   owner  — 主人私聊（完整工具）
+   *   social — 群聊 / 普通管理员 / 白名单成员私聊（只有社交工具）
+   *
+   * 跟 checkAccess 必须用同一套判断：都走 config.js 的 isOwner。
+   * 这里以前只判「在不在 admins 里」，普通管理员也会拿到完整工具档位。
    */
   function levelFor(cfg, chat) {
-    if (chat.kind === 'dm') {
-      const admin = cfg.admins.find((a) => a.userid === chat.userId)
-      if (admin) return 'owner'
-    }
+    if (chat.kind === 'dm' && isOwner(cfg, chat.userId)) return 'owner'
     return 'social'
   }
 

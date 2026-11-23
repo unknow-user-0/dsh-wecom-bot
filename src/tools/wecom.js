@@ -11,6 +11,7 @@
 
 import { defineTool, str, int, bool } from './define.js'
 import { sendLocalFile, uploadToDisk, searchDisk, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { listSkills } from '../memory/skills.js'
 
 /**
  * @param {object} d deps
@@ -216,14 +217,17 @@ export function buildTools(d) {
       '',
       '该记：对方的偏好、忌讳、身份、习惯、正在做要紧事。',
       '不该记：一次性闲聊、能自己查到的公开信息、别人的隐私不该扩散到群里。',
+      '',
+      'action="skill"：查「你学会的做法」（跨会话共享的流程/技巧）。系统提示里列了名字，',
+      '用到哪条就来这里查细节 —— 别凭名字猜正文。',
     ].join('\n'),
     properties: {
-      action: str('remember / recall / forget'),
+      action: str('remember / recall / forget / skill'),
       text: str('remember：要记住的一句话（直接陈述事实，不要写「用户说」）'),
       scope: str('remember：person / scene / skill / public'),
       type: str('remember：relation / preference / fact / state / ephemeral'),
       about: str('remember：关于谁（userid）；不填 = 当前说话的人'),
-      query: str('recall：想回忆什么'),
+      query: str('recall / skill：想回忆/想查什么'),
       id: str('forget：要作废的条目 id'),
       expires_hours: int('ephemeral 时：几小时后过期'),
     },
@@ -252,11 +256,26 @@ export function buildTools(d) {
 
       if (action === 'forget') {
         if (!args.id) return { ok: false, message: '要作废哪条？给个 id。' }
-        return { ok: memory.remove(args.id), message: memory.remove(args.id) ? '已作废。' : '没找到这条。' }
+        // 只调一次：第二次 remove 必然返回 false（已经作废了），
+        // 以前写成两句就是「作废成功却回一句没找到」。
+        const gone = memory.remove(args.id)
+        return { ok: gone, message: gone ? '已作废。' : '没找到这条。' }
+      }
+
+      // 查「学会的做法」：技能跨会话共享，按关键字在名字+正文里找
+      if (action === 'skill') {
+        const rows = listSkills(args.query || '')
+        if (!rows.length) return { ok: true, message: args.query ? '没学过这个。' : '还没有学会任何做法。' }
+        return { ok: true, message: rows.slice(0, 8).map((s) => `${s.name}：${s.text}`).join('\n') }
       }
 
       const hits = memory.recall(args.query || '', {
-        about: chat?.kind === 'dm' ? chat.userId : '',
+        // 关键：群里也要传当前说话人的 userid。
+        // 以前群里传空，而 recall 的隐私门禁是「about 不在场就整条挡掉」，
+        // 结果就是这个人在私聊里说过的一切，到了群里一个字都想不起来 ——
+        // 跨会话认人失效。传了 id 之后：认得他，但仍然只拿他自己的记忆，
+        // 绝不会把别人的记忆带出来。
+        about: chat?.userId || '',
         chatId: chat?.chatId || '',
         limit: 12,
       })

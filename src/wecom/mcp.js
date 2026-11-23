@@ -183,19 +183,8 @@ export function createMcpClient(url, { log = () => {}, timeoutMs = 30_000 } = {}
 }
 
 /**
- * 从 URL 里抠出 apikey（面板只让填完整 URL，这里校验格式）
- * @returns {string|null}
+ * 校验面板填的 URL 是不是企微 MCP 的合法形态
  */
-export function apikeyOf(url) {
-  try {
-    const u = new URL(url)
-    return u.searchParams.get('apikey')
-  } catch {
-    return null
-  }
-}
-
-/** 校验面板填的 URL 是不是企微 MCP 的合法形态 */
 export function validateMcpUrl(url, expectService) {
   const s = String(url || '').trim()
   if (s === '') return { ok: false, message: '没填' }

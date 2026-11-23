@@ -77,7 +77,16 @@ export const DEFAULTS = {
   },
 
   // ---- 模型 ----
+  // 后台小任务（记忆提炼）用哪个模型。留空 = 跟随 DSH 当前默认模型。
+  // 空着也能跑：resolveModel() 会去问 agentDefaultModel，所以开源用户不填也能用。
   model: { provider: '', model: '', reasoningEffort: 'low' },
+
+  // ---- 记忆 ----
+  // 只控制「自动整理」的节奏。开关本身在 features.memory（面板上叫「启用记忆」）。
+  memory: {
+    autoDistill: true,          // 每天自动整理一次
+    distillTimes: ['04:00'],    // 几点整理（本地时间，可多个）
+  },
 
   // ---- 人格 ----
   persona: { current: 'default' },
@@ -159,6 +168,21 @@ function normalize(c) {
   c.quota.globalDailyTokens = num(c.quota.globalDailyTokens, 0, 1e12, 50_000_000)
   c.quota.perChatDailyTokens = num(c.quota.perChatDailyTokens, 0, 1e12, 5_000_000)
   c.quota.burstPerMinute = num(c.quota.burstPerMinute, 1, 1000, 30)
+
+  // 记忆整理：时间点必须是 HH:MM，写错的时间点会让「到点就跑」永远不触发
+  if (typeof c.memory.autoDistill !== 'boolean') c.memory.autoDistill = true
+  const times = Array.isArray(c.memory.distillTimes) ? c.memory.distillTimes : []
+  const clean = times.map((t) => String(t || '').trim()).filter((t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t))
+  c.memory.distillTimes = clean.length ? [...new Set(clean)].slice(0, 4) : ['04:00']
+  // 提炼模型的坐标：provider/model 都空着 = 跟随默认。只填一个就等于没填（会退回跟随默认），
+  // 免得半截配置让 resolveModel 拿到一个不存在的路由。
+  const pm = c.model || {}
+  c.model = {
+    provider: String(pm.provider || '').trim(),
+    model: String(pm.model || '').trim(),
+    reasoningEffort: ['low', 'medium', 'high'].includes(pm.reasoningEffort) ? pm.reasoningEffort : 'low',
+  }
+  if (!c.model.provider || !c.model.model) { c.model.provider = ''; c.model.model = '' }
 
   // 管理员：保证 userid 非空、role 合法、只有一个 owner
   const seen = new Set()

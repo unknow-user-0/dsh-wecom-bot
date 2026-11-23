@@ -175,7 +175,7 @@ function archiveStale() {
 /**
  * 召回。
  * @param {string} query
- * @param {object} o { about, chatId, aboutList, limit, minScore }
+ * @param {object} o { about, chatId, aboutList, limit, minScore, silent }
  */
 export function recall(query, o = {}) {
   const now = Date.now()
@@ -236,14 +236,20 @@ export function recall(query, o = {}) {
 
   scored.sort((a, b) => b.score - a.score)
   const top = scored.slice(0, limit)
-  for (const h of top) h.it.hits = (h.it.hits || 0) + 1
 
   // 召回日志也要落盘，所以 save 必须放在这行之后。
   // 以前是先 save(db)、再 unshift —— 日志只活在内存里，重启就没了，
   // 表现就是「recallLog 永远是空的，到底有没有召回根本查不了」。
-  db.recallLog.unshift({ at: now, query: q.slice(0, 120), hits: top.map((h) => ({ id: h.it.id, text: h.it.text, score: Number(h.score.toFixed(2)) })) })
-  if (db.recallLog.length > 200) db.recallLog.length = 200
-  save(db)
+  //
+  // silent：每轮自动塞进用户消息的那次「你记得关于他的事」用它。
+  // 那条不是模型主动回忆，不该占召回日志，更重要的是不该每条消息都重写一遍
+  // memory.json（5000 条时一次几 MB，群里一分钟几十条就直接卡住了）。
+  if (!o.silent) {
+    db.recallLog.unshift({ at: now, query: q.slice(0, 120), hits: top.map((h) => ({ id: h.it.id, text: h.it.text, score: Number(h.score.toFixed(2)) })) })
+    if (db.recallLog.length > 200) db.recallLog.length = 200
+    for (const h of top) h.it.hits = (h.it.hits || 0) + 1
+    save(db)
+  }
 
   return top
 }

@@ -12,9 +12,16 @@
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
-import { describeImage, fitImageToBudget, sniffImageMime } from '../src/wecom/media.js'
-import { tryRequire } from '../src/core/deps.js'
+// 数据目录隔离：必须在任何插件模块被 import 之前设置。
+// 这个测试本身不写数据，但 media.js 的模块链会读 DATA_DIR，
+// 「测试不碰生产数据」这条守不住就得靠这里。
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'wecom-test-'))
+
+const { describeImage, fitImageToBudget, sniffImageMime } = await import('../src/wecom/media.js')
+const { tryRequire } = await import('../src/core/deps.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 let pass = 0

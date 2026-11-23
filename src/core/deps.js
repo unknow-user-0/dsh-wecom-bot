@@ -50,23 +50,3 @@ export function tryRequire(name) {
   cache.set(name, found)
   return found
 }
-
-/** 解析一个包，拿不到就抛（错误文案指向怎么装）。 */
-export function mustRequire(name, hint) {
-  const m = tryRequire(name)
-  if (!m) {
-    throw new Error(`缺依赖 ${name}${hint ? `（${hint}）` : ''}。在插件目录执行 pnpm add ${name}`)
-  }
-  return m
-}
-
-/** 解析包的安装目录（用来拼它的内部文件路径）。 */
-export function resolvePackageDir(name) {
-  for (const base of bases()) {
-    try {
-      const req = createRequire(join(base, 'noop.js'))
-      return dirname(req.resolve(`${name}/package.json`))
-    } catch {}
-  }
-  return ''
-}

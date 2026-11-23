@@ -25,8 +25,6 @@ export const HEARTBEAT_MS = 30_000
 export const REQUEST_TIMEOUT_MS = 15_000
 /** 流式节流：企微官方建议，太快会被限流 */
 export const STREAM_THROTTLE_MS = 1_100
-/** markdown 上限 20480 字节，按中文 3 字节/字留余量 */
-export const MAX_MESSAGE = 6_000
 
 /** errcode≠0：服务端明确拒绝，可安全告知 / 不改内容重试 */
 export class WecomApiError extends Error {

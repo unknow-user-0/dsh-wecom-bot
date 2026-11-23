@@ -163,24 +163,6 @@ export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFo
 }
 
 /**
- * 发图片（Buffer 形式，比如生图结果）。
- * 走 MCP 的 message_aibot_send，因为长连接的 image 帧也要 media_id。
- */
-export async function sendImageBuffer({ buffer, chatId, chatType, fileName = 'image.png' }, { mcpFor, log: logRaw = () => {} }) {
-  const log = asLog(logRaw)
-  const up = await uploadMedia({ buffer, fileName, type: 'image' }, { mcpFor, log: logRaw })
-  const msg = await mcpFor?.('msg')
-  if (!msg) throw new SendFileError('没配 MCP 的 msg 服务，发不了图片。', 'no_msg_mcp')
-  try {
-    const r = await msg.call('message_aibot_send', { chat_id: chatId, msg_type: 'image', image: { media_id: up.mediaId } })
-    log('info', `图片已发（${up.bytes} 字节）`)
-    return { ok: true, mediaId: up.mediaId, bytes: up.bytes, raw: r }
-  } catch (error) {
-    throw new SendFileError(`发图失败：${error.message}`, 'send_failed')
-  }
-}
-
-/**
  * 上传到微盘（超过单次上限时的唯一出路）。
  * 微盘单文件上限 20 GB，比窗口的 1 GB 宽松得多。
  */
@@ -207,11 +189,4 @@ export async function searchDisk(keyword, { mcpFor }) {
   const disk = await mcpFor?.('disk')
   if (!disk) throw new SendFileError('没配 MCP 的 disk 服务。', 'no_mcp')
   return disk.call('disk_files_search', { keyword })
-}
-
-/** 从消息里下载媒体（入站文件/图片的备用通道） */
-export async function fetchMessageMedia(mediaId, { mcpFor }) {
-  const msg = await mcpFor?.('msg')
-  if (!msg) throw new SendFileError('没配 MCP 的 msg 服务。', 'no_mcp')
-  return msg.call('message_files_get', { media_id: mediaId })
 }

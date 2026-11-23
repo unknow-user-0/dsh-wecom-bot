@@ -18,7 +18,11 @@ import { loadConfig, saveConfig, publicConfig, merge, DATA_DIR } from './core/co
 import { createLogger, recentLogs, redact } from './core/logger.js'
 import { fireAndForget } from './core/safe.js'
 import { record as recordActivity, recentEntries, chatStats, flushLog } from './core/activity.js'
-import { createVault, mcpRef } from './core/vault.js'
+import * as chatlog from './core/chatlog.js'
+import { resolveModel, listModels, ask as askModel } from './core/model.js'
+import { createConsolidator } from './memory/consolidate.js'
+import * as skills from './memory/skills.js'
+import { createVault, mcpRef, REF } from './core/vault.js'
 import { checkQuota, addUsage, tickMinute, usageSnapshot, resetUsage, estimateTokens } from './core/quota.js'
 import { createWecomClient, WecomApiError, WecomUncertainError } from './wecom/client.js'
 import { createMcpClient, MCP_SERVICES, validateMcpUrl } from './wecom/mcp.js'
@@ -149,7 +153,7 @@ export function apply(ctx) {
 
   async function refreshSecret() {
     try {
-      secretCache = (await secrets.resolve('WECOM_BOT_SECRET')) || ''
+      secretCache = (await secrets.resolve(REF.secret)) || ''
     } catch {
       secretCache = ''
     }
@@ -287,6 +291,17 @@ export function apply(ctx) {
     try {
       await client?.respond(reqId, { msgtype: 'markdown', markdown: { content: text } })
       recordActivity({ kind: 'out', chatId: frame.__chatId || '', text, name: frame.__chatName || '' })
+      // 机器人自己说的话也要进流水：提炼时要能看出「对方问-它怎么答-对方满意了没」，
+      // 只有对方的话会把一段对话切成孤立的问句，学不到做法。
+      chatlog.append({
+        chatId: frame.__chatId || '',
+        kind: frame.__chatKind || 'dm',
+        chatName: frame.__chatName || '',
+        userId: '',
+        name: '我',
+        who: 'bot',
+        text,
+      })
     } catch (error) {
       log.error(`回复失败：${error.message}`)
     }
@@ -309,6 +324,14 @@ export function apply(ctx) {
         '什么时候主动记：对方的偏好、忌讳、身份、正在办的要紧事。不记一次性的闲聊、不记能自己查到的公开信息。',
         '召回时如果某条标注是从别的群/别的地方听来的，那件事不要当成当前这个群的公开信息到处讲。',
       ]
+      // 技能：跨会话共享的「怎么做」。只列名字，正文按需查 ——
+      // 全量正文塞进系统提示会让每轮的 token 都变贵，而且大部分本轮用不上。
+      const sk = skills.listSkills().slice(0, 12)
+      if (sk.length) {
+        lines.push('')
+        lines.push('【你学会的做法】用到哪条就 wecom_memory(action="skill", query="关键字") 看细节。')
+        for (const x of sk) lines.push(`· ${x.name}`)
+      }
       return lines.join('\n')
     } catch { return '' }
   }
@@ -316,6 +339,45 @@ export function apply(ctx) {
   /** 每轮拼的一小段上下文（记忆提示，很短） */
   function contextLineOf() {
     return contextText()
+  }
+
+  /**
+   * 「现在是谁在说话 + 你记得关于他的什么」。
+   *
+   * 这条是全篇最要紧的一处：以前每轮只告诉模型「你有记性，自己去查」，
+   * 但模型在群里根本不知道对方是谁、也就想不到该查谁 —— 于是他在私聊里
+   * 说过的一切，换个会话就像没发生过。跨会话认人不是「存得下 ID」的问题，
+   * 是「轮到这一轮时有没有把 ID 和记得的事摆到眼前」的问题。
+   *
+   * 挂在当轮用户消息里而不是系统提示：系统提示每轮都会补一份运行时上下文快照，
+   * 内容变了就多一份，历史会越滚越大。放这里只占当轮。
+   */
+  function whoLine(chat) {
+    const name = chat.displayName || chat.name || ''
+    const where = chat.kind === 'group' ? `群「${chat.groupName || chat.name || ''}」里` : '私聊里'
+    const head = `【现在跟你说话的人】${name || '（没名字）'}${chat.userId ? `（ID ${chat.userId}）` : ''}，在${where}。`
+    let mine = []
+    try {
+      mine = memory.recall('', {
+        about: chat.userId || '',
+        chatId: chat.chatId || '',
+        limit: 6,
+        // 不写召回日志、不落盘：这条是每轮自动塞的，不是模型主动回忆。
+        // 每条消息都改一次 memory.json，群消息一多就把磁盘打满。
+        silent: true,
+      })
+    } catch {}
+    if (!mine.length) return `${head}你目前对他没有印象（记忆库里没有关于他的事）。`
+    // 只要「关于这个人」的：public/skill 是所有会话共享的，混进这段会挤掉
+    // 真正属于他的那几条，而它们本来就在系统提示的「学会的做法」里。
+    const only = mine.filter((h) => h.it.about && String(h.it.about) === String(chat.userId))
+    if (!only.length) return `${head}你目前对他没有印象（记忆库里没有关于他的事）。`
+    const lines = only.map((h) => `· ${h.it.text}`)
+    return [
+      head,
+      '你记得关于他的事（从以前的对话里记下来的，直接当自己知道就行，别问「你怎么知道」）：',
+      ...lines,
+    ].join('\n')
   }
 
   // ---------- 占位（收到消息先回一句：文字 / 图片 / 都发）----------
@@ -329,6 +391,19 @@ export function apply(ctx) {
   // 发图要 media_id，media_id 只能从 disk / mail / doc 的 media_upload 换。
   // 面板上要把这个说清楚：选了图但没配这三个服务之一，图是发不出去的。
   const mcpUploadReady = () => ['disk', 'mail', 'doc'].some((s) => Boolean(serviceUrlOf(s)))
+
+  // ---------- 记忆整理（流水 → 提炼 → 记忆/技能）----------
+  const consolidator = createConsolidator({
+    dsh: ctx,
+    getConfig,
+    log: logger.child('memory'),
+  })
+  // 每分钟看一眼到没到点。到点才真跑，平时只是比两个数字。
+  ctx.effect(() => {
+    const t = setInterval(() => { fireAndForget(consolidator.tick(), '自动整理记忆', log, 'debug') }, 60_000)
+    t.unref?.()
+    return () => clearInterval(t)
+  }, 'wecom-bot: 记忆整理定时器')
 
   // ---------- 收消息 ----------
   const merger = createMerger({
@@ -360,7 +435,18 @@ export function apply(ctx) {
     chat.name = chat.kind === 'group' ? chat.groupName : chat.displayName
     frame.__chatId = chat.chatId
     frame.__chatName = chat.name || ''
+    frame.__chatKind = chat.kind
     recordActivity({ kind: 'in', chatId: chat.chatId, name: chat.name, userId: chat.userId, text: merged })
+    // 流水是每日提炼的原料。activity 那份只留 3000 条给面板看，不够提炼用。
+    chatlog.append({
+      chatId: chat.chatId,
+      kind: chat.kind,
+      chatName: chat.name || '',
+      userId: chat.userId,
+      name: chat.displayName || chat.name || '',
+      who: 'user',
+      text: merged,
+    })
 
     let info
     try {
@@ -395,6 +481,10 @@ export function apply(ctx) {
       const p = saveInboundFile(first, f)
       if (p) promptText += `\n\n[对方发来一个文件，已存到：${p}]`
     }
+    // 说话人 → 「你记得关于他的事」。
+    // 这一小段必须挂在当轮用户消息里，不能进系统提示：系统提示每轮都会追加一份
+    // 运行时上下文快照，内容一变就多一份快照，历史会越滚越大（413 就是这么来的）。
+    if (cfg.features.memory) promptText = `${whoLine(chat)}\n\n${promptText}`
 
     try {
       await hub.prompt(chat, promptText, { attachments: attachments.filter((a) => a && a.attachment) })
@@ -819,7 +909,7 @@ export function apply(ctx) {
     next.workspaceDir = cfg.workspaceDir
     // 密钥单独收，不进 config
     if (typeof body.secret === 'string' && body.secret.trim()) {
-      await secrets.set('WECOM_BOT_SECRET', body.secret.trim())
+      await secrets.set(REF.secret, body.secret.trim())
       secretCache = body.secret.trim()
     }
     return { ok: true, config: publicConfig(setConfig(next)) }
@@ -828,7 +918,7 @@ export function apply(ctx) {
     const body = await readBody(req)
     if (body.botId) cfg = saveConfig({ ...cfg, botId: String(body.botId).trim() })
     if (typeof body.secret === 'string' && body.secret.trim()) {
-      await secrets.set('WECOM_BOT_SECRET', body.secret.trim())
+      await secrets.set(REF.secret, body.secret.trim())
       secretCache = body.secret.trim()
     }
     if (!cfg.enabled) cfg = saveConfig({ ...cfg, enabled: true })
@@ -851,6 +941,63 @@ export function apply(ctx) {
   route('/memory/delete', async (req) => {
     const body = await readBody(req)
     return { ok: memory.remove(body.id) }
+  })
+
+  // ---- 记忆整理 ----
+  route('/memory/status', () => consolidator.status())
+  route('/memory/models', async () => {
+    const r = await listModels(ctx)
+    // 顺手告诉面板「不选的时候会跟随哪个」——用户才知道空着是不是真的能用
+    const st = consolidator.status()
+    return { ...r, following: st.model, modelFromConfig: st.modelFromConfig }
+  })
+  route('/memory/distill', async (req) => {
+    const body = await readBody(req).catch(() => ({}))
+    return consolidator.run({ includeToday: body?.includeToday !== false, days: body?.days })
+  })
+  // 技能列表：跨会话共享，所以不按 chatId 过滤
+  route('/skills', (req) => {
+    const url = new URL(req.url, 'http://x')
+    const q = url.searchParams.get('q') || ''
+    return { ok: true, rows: skills.listSkills(q), stats: skills.stats() }
+  })
+  route('/skills/save', async (req) => {
+    const body = await readBody(req)
+    if (body.id) {
+      const ok = skills.updateSkill(body.id, { name: body.name, text: body.text })
+      return ok ? { ok: true } : { ok: false, message: '没这条技能' }
+    }
+    const item = skills.importSkill({ name: body.name, text: body.text })
+    return item ? { ok: true, item } : { ok: false, message: '正文不能是空的' }
+  })
+  route('/skills/delete', async (req) => {
+    const body = await readBody(req)
+    return { ok: skills.removeSkill(body.id) }
+  })
+  route('/skills/merge', async () => {
+    // 手动触发一次整合：让模型看全量技能，判断哪些是同一件事
+    const cfg2 = getConfig()
+    const target = resolveModel(ctx, cfg2)
+    if (!target) return { ok: false, message: '还没选提炼用的模型' }
+    const all = skills.listSkills()
+    if (all.length < 2) return { ok: false, message: '技能少于两条，没什么可整合的' }
+    const text = all.map((s) => `#${s.id} ${s.name}：${s.text}`).join('\n')
+    let out = ''
+    try {
+      out = await askModel(ctx, target, {
+        system: '下面是一个聊天角色学会的做法列表。找出「其实是同一件事」的条目，把它们合成一条：名字用更准确的，描述保留信息最全的那句（不要简单拼接）。只输出 JSON：{"groups":[{"ids":["id1","id2"],"name":"名字","text":"描述"}]}。没有可合并的就输出 {"groups":[]}。不要输出别的文字。',
+        text,
+        maxTokens: 2000,
+        temperature: 0.1,
+      })
+    } catch (error) {
+      return { ok: false, message: `模型调用失败：${error.message}` }
+    }
+    const m = String(out).match(/\{[\s\S]*\}/)
+    let groups = []
+    try { groups = (JSON.parse(m ? m[0] : out).groups) || [] } catch {}
+    const merged = skills.applyMergeGroups(groups, logger.child('skills'))
+    return { ok: true, merged, message: merged ? `合并掉 ${merged} 条重复` : '没有需要合并的' }
   })
   route('/personas', () => ({
     ok: true,

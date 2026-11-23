@@ -13,8 +13,16 @@
 // 依赖 sharp。装了才跑，没装就跳过（CI 上可以不装）。
 // 跑法：node dev/media-animated.mjs
 
-import { tryRequire } from '../src/core/deps.js'
-import { fitImageToBudget, imageExt, describeImage, sniffImageMime } from '../src/wecom/media.js'
+// 数据目录隔离：必须在任何插件模块被 import 之前设置。
+// ESM 的 import 会被提升，所以这里改成「先用一段纯 node 内建的同步代码设好环境变量，
+// 再用 dynamic import 加载插件」—— 顺序才靠得住。
+import { mkdtempSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'wecom-test-'))
+
+const { tryRequire } = await import('../src/core/deps.js')
+const { fitImageToBudget, imageExt, describeImage, sniffImageMime } = await import('../src/wecom/media.js')
 
 const problems = []
 const check = (ok, name, extra = '') => {

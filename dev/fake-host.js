@@ -107,6 +107,9 @@ export function createFakeHost(opts = {}) {
 
   const listeners = new Map()
   const services = {}
+  // 让测试能注入服务（llm / agentDefaultModel 这类）。
+  // 不注入时 ctx.get(name) 拿到 null，跟真环境里「没装那个插件」一样。
+  for (const [k, v] of Object.entries(opts.services || {})) services[k] = v
   function ensureSession(id, extra = {}) {
     if (!sessions.has(id)) {
       const promptReply = { text: opts.replyText ?? '好的' }
@@ -146,6 +149,8 @@ export function createFakeHost(opts = {}) {
   return {
     ctx, routes, sessions, variables, tools, createCalls, log, listeners,
     get service() { return services },
+    /** 测试用：后注入/替换服务（比如临时把 llm 换成一个会抛错的假货） */
+    inject(name, value) { services[name] = value; ctx[name] = value },
     callRoute(path, body) {
       const r = routes.get(path)
       if (!r) return Promise.resolve({ ok: false, message: 'no route ' + path })

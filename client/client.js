@@ -1309,20 +1309,91 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [rows, setRows] = useState([])
       const [stats, setStats] = useState(null)
       const [q, setQ] = useState('')
+      const [st, setSt] = useState(null)
+      const [models, setModels] = useState(null)
+      const [sk, setSk] = useState([])
+      const [skQ, setSkQ] = useState('')
+      const [busy, setBusy] = useState('')
       const load = useCallback(async (query) => {
         const r = await get('/memory' + (query ? '?q=' + encodeURIComponent(query) : ''))
         if (r?.ok) { setRows(r.rows || []); setStats(r.stats || null) }
       }, [])
-      useEffect(() => { void load('') }, [load])
+      const loadSkills = useCallback(async (query) => {
+        const r = await get('/skills' + (query ? '?q=' + encodeURIComponent(query) : ''))
+        if (r?.ok) setSk(r.rows || [])
+      }, [])
+      const loadState = useCallback(async () => {
+        const r = await get('/memory/status')
+        if (r?.ok) setSt(r)
+      }, [])
+      useEffect(() => { void load(''); void loadSkills(''); void loadState() }, [load, loadSkills, loadState])
+      useEffect(() => { if (!models) void get('/memory/models').then((r) => r?.ok && setModels(r)) }, [models])
+
       const del = async (id) => { const r = await post('/memory/delete', { id }); if (r?.ok) { toast('删了', 'ok'); void load(q) } }
+      const distill = async () => {
+        setBusy('distill')
+        const r = await post('/memory/distill', { includeToday: true })
+        setBusy('')
+        toast(r?.message || '跑完了', r?.ok ? 'ok' : 'err')
+        void loadState(); void load(q); void loadSkills(skQ)
+      }
+      const mergeSkills = async () => {
+        setBusy('merge')
+        const r = await post('/skills/merge', {})
+        setBusy('')
+        toast(r?.message || '跑完了', r?.ok ? 'ok' : 'err')
+        void loadSkills(skQ); void loadState()
+      }
+      const curModel = draft.model?.provider && draft.model?.model
+        ? draft.model.provider + '|' + draft.model.model
+        : ''
+
       return h('div', { className: 'wb-sect' },
-        // 记忆开关搬到这里了 —— 开关和它控制的东西放同一页，不用在「功能」和「记忆」之间来回跳
         h(Card, { title: '记忆', hint: '关掉之后不再记新的，也不召回旧的。已经记下来的东西不会删。' },
           h('div', { className: 'wb-between' },
             h('div', null,
               h('div', null, '启用记忆'),
               h('div', { className: 'wb-dim wb-small' }, '四层记忆：人 / 场景 / 技能 / 公共')),
             h(Switch, { on: !!draft.features?.memory, onChange: (v) => setD('features.memory', v) }))),
+
+        // 自动整理：每天到点把当天的聊天流水提炼成记忆。这是唯一会周期性花 token 的功能，
+        // 所以默认开、但必须让人看得见、关得掉。
+        h(Card, { title: '自动整理', hint: '每天到点把当天的聊天提炼成长期记忆。整理要调一次模型，会花一点 token。' },
+          h('div', { className: 'wb-between', style: { marginBottom: 10 } },
+            h('div', null,
+              h('div', null, '每天自动整理'),
+              h('div', { className: 'wb-dim wb-small' }, st?.auto ? `到点就跑：${(st.times || []).join(' / ')}` : '关着，只能手动点')),
+            h(Switch, { on: draft.memory?.autoDistill !== false, onChange: (v) => setD('memory.autoDistill', v) })),
+          h('div', { className: 'wb-row', style: { marginBottom: 10 } },
+            h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } }, '几点整理'),
+            h('input', {
+              className: 'wb-input', style: { width: 90 },
+              value: (draft.memory?.distillTimes || ['04:00']).join(','),
+              placeholder: '04:00',
+              onChange: (e) => setD('memory.distillTimes', e.target.value.split(/[,，\s]+/).filter(Boolean)),
+            }),
+            h('span', { className: 'wb-small wb-dim' }, '本地时间，可写多个用逗号隔开')),
+          h('div', { className: 'wb-row', style: { marginBottom: 10 } },
+            h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } }, '整理用哪个模型'),
+            h('select', {
+              className: 'wb-input', style: { flex: 1, minWidth: 220 },
+              value: curModel,
+              onChange: (e) => {
+                const v = e.target.value
+                if (!v) { setD('model.provider', ''); setD('model.model', ''); return }
+                const [provider, model] = v.split('|')
+                setD('model.provider', provider); setD('model.model', model)
+              },
+            },
+              h('option', { value: '' }, models?.following ? `跟随当前默认（${models.following}）` : '跟随当前默认'),
+              (models?.models || []).map((m) => h('option', { key: m.provider + '|' + m.model, value: m.provider + '|' + m.model }, `${m.providerName || m.provider} · ${m.name || m.model}`)),
+            )),
+          h('div', { className: 'wb-row' },
+            h(Btn, { onClick: distill, disabled: busy === 'distill' }, busy === 'distill' ? '整理中…' : '现在整理一次'),
+            st?.last?.at ? h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } },
+              `${timeAgo(st.last.at)}整理过：${st.last.error ? '失败（' + st.last.error + '）' : `新 ${st.last.added || 0} / 合并 ${st.last.updated || 0} / 过时 ${st.last.outdated || 0} / 技能 ${st.last.skills || 0}`}`) : null,
+            st?.pendingDays?.length ? h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } }, `还有 ${st.pendingDays.length} 天没整理`) : null)),
+
         h(Card, { title: '记忆库', hint: '四层：人（跨会话）/ 场景（这个群或这个私聊）/ 技能（所有人共享）/ 公共（全局事实）。过时的不会被删，只是不再被召回。' },
           stats ? h('div', { className: 'wb-row', style: { marginBottom: 12 } },
             h('span', { className: 'wb-tag brand' }, '共 ' + stats.total + ' 条'),
@@ -1339,9 +1410,38 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               h('span', { className: cx('wb-tag', m.scope === 'person' ? 'brand' : m.scope === 'scene' ? 'ok' : '') }, m.scope),
               h('div', { className: 'main' },
                 h('div', { className: 't', style: { fontWeight: 500 } }, m.text),
-                h('div', { className: 'd' }, [m.type, m.about, m.chatName, timeAgo(m.at)].filter(Boolean).join(' · '))),
+                h('div', { className: 'd' }, [m.type, m.aboutName || m.about, m.chatName || m.originName, m.source === 'auto' ? '自动' : '', timeAgo(m.at)].filter(Boolean).join(' · '))),
               h(Btn, { sm: true, kind: 'ghost', onClick: () => void del(m.id) }, '删'))))
-            : h(Empty, null, '还没有记忆。聊几句，让它记点东西。')))
+            : h(Empty, null, '还没有记忆。聊几句，或者点上面的「现在整理一次」。')),
+
+        // 所学技能：跨会话共享，跟记忆分开管 —— 记忆是「关于谁」，技能是「怎么做」
+        h(Card, {
+          title: '所学技能',
+          hint: '从聊天里提炼出来的可复用做法，所有会话共享。不同会话学到相似的做法会自动并成一条。',
+          right: h(Btn, { sm: true, kind: 'ghost', onClick: mergeSkills, disabled: busy === 'merge' }, busy === 'merge' ? '整合中…' : '再整合一次'),
+        },
+          h('div', { className: 'wb-row', style: { marginBottom: 12 } },
+            h('input', { className: 'wb-input', style: { flex: 1, minWidth: 220 }, value: skQ, placeholder: '搜技能', onChange: (e) => setSkQ(e.target.value), onKeyDown: (e) => e.key === 'Enter' && void loadSkills(skQ) }),
+            h(Btn, { onClick: () => void loadSkills(skQ) }, '搜'),
+            h(Btn, { kind: 'ghost', onClick: async () => {
+              const text = window.prompt('要加一条什么做法？（一句话说清怎么做）')
+              if (!text) return
+              const name = window.prompt('给这条做法起个名字（4~8 个字）') || '做法'
+              const r = await post('/skills/save', { name, text })
+              if (r?.ok) { toast('加了', 'ok'); void loadSkills(skQ) } else toast(r?.message || '没加上', 'err')
+            } }, '手动加一条')),
+          sk.length
+            ? h('div', { className: 'wb-list' }, sk.slice(0, 200).map((s) => h('div', { key: s.id, className: 'wb-item' },
+              h('span', { className: 'wb-tag brand' }, s.name),
+              h('div', { className: 'main' },
+                h('div', { className: 't', style: { fontWeight: 500 } }, s.text),
+                h('div', { className: 'd' }, [
+                  (s.times || 1) > 1 ? `学过 ${s.times} 次` : '',
+                  (s.from || []).map((f) => f.chatName).filter(Boolean).slice(0, 3).join(' / '),
+                  timeAgo(s.at),
+                ].filter(Boolean).join(' · '))),
+              h(Btn, { sm: true, kind: 'ghost', onClick: () => void post('/skills/delete', { id: s.id }).then((r) => { if (r?.ok) { toast('删了', 'ok'); void loadSkills(skQ) } }) }, '删'))))
+            : h(Empty, null, '还没学会任何做法。整理过几次之后会出现在这里。')))
     }
 
     // ---------------- 陪伴（心情 / 主动搭话 / 生图） ----------------

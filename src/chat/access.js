@@ -4,14 +4,35 @@
 //   whitelist —— 只有 admins 和 allow.users / allow.groups 里的人能聊
 //   open      —— 只要机器人被拉进群 / 被人私聊就默认能聊（但仍记录名单，方便日后切回白名单）
 //
-// 管理员永远能私聊，不用写进白名单；管理员永远是最高档位。
+// 管理员永远能私聊，不用写进白名单。
+// 但只有 role === 'owner' 的那一个管理员才是最高档位 —— 见 isOwner。
 
-/** 判断这条消息能不能处理 */
+import { adminOf, isOwner } from '../core/config.js'
+
+/**
+ * 判断这条消息能不能处理
+ *
+ * 档位（level）只有两个：
+ *   owner  — 主人的私聊，完整工具（能碰本机文件、开浏览器）
+ *   social — 其他所有人（群聊、管理员私聊、白名单私聊），只有社交工具
+ *
+ * 注意这里必须区分 owner / admin 两种角色：admins 数组里两个角色都有，
+ * 以前只判「是不是在 admins 里」就给 owner 档 —— 等于把一个普通管理员
+ * 直接升成能读写本机文件的主人。角色字段存在就是为了这个。
+ *
+ * 判定统一走 config.js 的 isOwner / adminOf，别再各写一遍：
+ * src/chat/hub.js 的 levelFor 用的是同一对函数，两处必须同步，
+ * 否则会出现「准入说 social、建会话给 owner」这种分叉。
+ */
 export function checkAccess(cfg, chat) {
-  const admin = chat.userId ? cfg.admins.find((a) => a.userid === chat.userId) : null
+  const admin = chat.userId ? adminOf(cfg, chat.userId) : null
+  const owner = Boolean(chat.userId) && isOwner(cfg, chat.userId)
 
-  // 管理员永远放行（单聊）
-  if (chat.kind === 'dm' && admin) return { allowed: true, reason: '管理员', level: 'owner', admin }
+  // 主人永远放行（单聊）
+  if (chat.kind === 'dm' && owner) return { allowed: true, reason: '主人', level: 'owner', admin }
+
+  // 普通管理员：能聊、但只有社交档位
+  if (chat.kind === 'dm' && admin) return { allowed: true, reason: '管理员', level: 'social', admin }
 
   if (cfg.accessMode === 'open') {
     return { allowed: true, reason: '开放模式', level: 'social', admin }

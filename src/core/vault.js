@@ -10,8 +10,12 @@
 
 import { createHash } from 'node:crypto'
 
+/**
+ * 凭据引用名。只留真正在用的那几个 —— 这里多写一个「看起来很完整」的键
+ * （比如 botId），会让人以为 bot_id 也走凭据库，实际它明文躺在 config.json 里
+ * （面板要显示它，本来也不是秘密）。名字对不上现实比少一个字段更糟。
+ */
 export const REF = {
-  botId: 'WECOM_BOT_BOTID',
   secret: 'WECOM_BOT_SECRET',
 }
 
