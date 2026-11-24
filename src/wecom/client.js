@@ -53,7 +53,11 @@ export function createWecomClient(options) {
     wsUrl = WS_URL,
     heartbeatMs = HEARTBEAT_MS,
     requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    // 注入点：重连行为只能靠可控的假 socket 验证（真 ws 连不上就没法造「第
+    // 一次失败、第二次成功」这种序列）。生产路径不传，行为完全不变。
+    wsLib: injectedWs,
   } = options
+  const Ws = injectedWs || WsLib
 
   let ws
   let connected = false
@@ -103,7 +107,7 @@ export function createWecomClient(options) {
     return new Promise((resolve, reject) => {
       // 注意：不能判 connected —— 订阅帧本身就是在 connected 置 true 之前发的。
       // 这里只看 socket 是否处于 OPEN。
-      const OPEN = WsLib?.OPEN ?? 1
+      const OPEN = Ws?.OPEN ?? 1
       if (!ws || ws.readyState !== OPEN) {
         reject(new WecomUncertainError('长连接未就绪'))
         return
@@ -179,7 +183,14 @@ export function createWecomClient(options) {
     log('info', `${Math.round(delay / 1000)} 秒后重连`)
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
-      connect().catch((error) => log('warn', `重连失败：${error.message}`))
+      connect().catch((error) => {
+        log('warn', `重连失败：${error.message}`)
+        // 失败必须接着排下一轮。
+        // 少了这一句就是「网络一抖，插件永久躺平」：开机时如果 Wi-Fi 比 DSH 起得慢，
+        // 第一次重连拿到 ECONNREFUSED，之后就再也不会试了 —— 面板显示「断开」，
+        // 用户以为机器人挂了，实际上它在等一个永远不会来的回调。
+        scheduleReconnect()
+      })
     }, delay)
     reconnectTimer.unref?.()
   }
@@ -189,14 +200,14 @@ export function createWecomClient(options) {
     if (kicked) throw new Error('已被踢下线，请先手动重连')
     if (connected) return
 
-    if (!WsLib) {
+    if (!Ws) {
       throw new Error('缺少 ws 库（企微长连接必须用 ws，Node 全局 WebSocket 与本服务端握手不兼容）')
     }
     if (!botId || !secret) throw new Error('bot_id / secret 未配置')
 
     if (ws) { try { ws.removeAllListeners(); ws.close() } catch {} ws = undefined }
 
-    ws = new WsLib(wsUrl)
+    ws = new Ws(wsUrl)
 
     await new Promise((resolve, reject) => {
       let settled = false
@@ -239,8 +250,13 @@ export function createWecomClient(options) {
         clearInflight('长连接已断开')
         setState({ connected: false, kicked, reason: `连接关闭（code ${code}）` })
         if (!settled) fail(new WecomUncertainError(`长连接在订阅完成前关闭（code ${code}）`))
-        else if (wasConnected && !stopped && !kicked) {
-          log('warn', `长连接断开（code ${code}），准备重连`)
+        // 凡是「我们自己没打算断」的关闭，都要接着排重连 —— 包括首次连接就失败。
+        // 以前这里写的是 else if (wasConnected && ...)，于是开机时网络比 DSH 慢
+        // 一点点（订阅前就 close）就永远不再试；面板一直显示「断开」，
+        // 用户以为机器人自己挂了，实际上重连链从第一环就没接上。
+        if (!stopped && !kicked) {
+          if (wasConnected) log('warn', `长连接断开（code ${code}），准备重连`)
+          else log('warn', `连接没建起来（code ${code}），准备重连`)
           scheduleReconnect()
         }
       })
