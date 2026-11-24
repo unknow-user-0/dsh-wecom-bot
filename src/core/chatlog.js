@@ -50,6 +50,32 @@ export function append(entry) {
     text: String(entry.text || '').slice(0, 2000),
   })
   if (buf.length >= 50) persist()
+  else armFlush()
+}
+
+/**
+ * 攒够 50 条再落盘是省 IO，但代价是「进程一崩，今天的对话就没了」。
+ * 而 chatlog 是记忆提炼的唯一原料 —— 丢了就永远补不回来（企微不重发历史）。
+ * 所以加一个节流落盘：有新增就排一次，30 秒内最多写一次。
+ * 为什么不是每条都写：群消息密集时每条一个 writeFileSync 会把事件循环堵住，
+ * 那比丢数据更早被用户感知到（回消息变卡）。
+ */
+const FLUSH_INTERVAL_MS = 30_000
+let flushTimer
+
+function armFlush() {
+  if (flushTimer) return
+  flushTimer = setTimeout(() => {
+    flushTimer = undefined
+    persist()
+  }, FLUSH_INTERVAL_MS)
+  flushTimer.unref?.()
+}
+
+/** 进程退出前落盘（host 的 effect 清理函数会调） */
+export function flush() {
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = undefined }
+  persist()
 }
 
 function persist() {
@@ -68,8 +94,6 @@ function persist() {
     // 写不进去也不能影响回消息 —— 流水只是副产品
   }
 }
-
-export function flush() { persist() }
 
 /** 某一天的流水（含还没落盘的内存部分） */
 export function readDay(day) {

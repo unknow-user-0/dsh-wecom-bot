@@ -221,7 +221,13 @@ export function apply(ctx) {
       if (cfg.enabled) return startConnection()
       return undefined
     }).catch(() => {})
-    return () => { void stopConnection() }
+    // 退出前把内存里还没落盘的流水写掉。
+    // 不接这一步，关掉 DSH 就等于把「今天还没攒够 50 条」的对话整段丢了，
+    // 而 chatlog 是记忆提炼的唯一原料，企微不会重发历史，丢了就补不回来。
+    return () => {
+      try { chatlog.flush() } catch {}
+      void stopConnection()
+    }
   }, 'wecom-bot: 长连接')
 
   // ---------- 一轮回复：盯会话事件 ----------
