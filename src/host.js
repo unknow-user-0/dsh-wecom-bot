@@ -44,7 +44,7 @@ import { createDouyinResolver } from './video/douyin.js'
 import { createAsr } from './video/asr.js'
 
 export const name = 'wecom-bot'
-export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt']
+export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PKG = (() => { try { return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) } catch { return { version: '?' } } })()
