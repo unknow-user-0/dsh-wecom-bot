@@ -1,7 +1,7 @@
 // WeCom Bot · 宿主半边（DSH 插件入口）
 //
 // 让 DSH 里的 AI 以企业微信智能机器人的身份住在企微里：
-//   企微智能机器人（长连接）⇄ 本插件 ⇄ DSH 会话（自带三个 preset + 人格）
+//   企微智能机器人（长连接）⇄ 本插件 ⇄ DSH 会话（自带两个 preset + 人格）
 // 面板在侧栏（网页半边见 client/client.js），这里提供它要的 /wecom-bot/api/* 接口。
 //
 // 这个文件只管装配：配置、长连接、聊天中枢、人格变量、工具挂载、面板接口。
@@ -64,7 +64,7 @@ export function apply(ctx) {
   const getConfig = () => cfg
   const secrets = createVault(ctx, log)
 
-  // ---------- 人格与规则：注入到三个 preset 的提示词变量 ----------
+  // ---------- 人格与规则：注入到两个 preset 的提示词变量 ----------
   const variable = (n, fn) => ctx.effect(() => ctx.systemPrompt.variable(n, fn), `wecom-bot: 变量 ${n}`)
   variable('wecom_persona', () => personaText(cfg))
   variable('wecom_rules_owner', () => rulesText('owner', cfg))
@@ -78,6 +78,19 @@ export function apply(ctx) {
   const sessionChat = new Map()
   /** sessionId → 这一轮的回复状态 */
   const turnState = new Map()
+  // 同一个会话的一轮必须串行到「回复发出」为止：否则长任务 A 还在跑时，
+  // 第二条消息 B 会覆盖 turnState 里 A 的槽位 → A 的 req_id 丢失 → 协议层发不出，
+  // 表现为「会话里有回复、用户却收不到」。仿 mountChain 按 sid 排队，跨会话不互相阻塞。
+  const turnChain = new Map()
+  function runTurn(sid, fn) {
+    const prev = turnChain.get(sid) || Promise.resolve()
+    const next = prev.then(fn).catch((error) => {
+      log.warn(`处理会话 ${String(sid).slice(-8)} 这一轮出错：${error.message}`)
+    })
+    turnChain.set(sid, next)
+    next.then(() => { if (turnChain.get(sid) === next) turnChain.delete(sid) })
+    return next
+  }
 
   // ---------- 网页操作（专用浏览器 + 登录态） ----------
   // 只在用到时才启动浏览器，光开面板不会弹窗。
@@ -132,12 +145,22 @@ export function apply(ctx) {
 
   /** 拿某个服务的 MCP 客户端；没配就返回 null（工具据此降级） */
   async function mcpFor(service, userid) {
-    const found = serviceUrlOf(service, userid)
+    // userid 口径归一：面板存的时候可能是 number，工具调用传的是 string。
+    // mcpRef 内部虽然 String() 了，但 serviceUrlOf 的严格 find 会漏，
+    // 统一成字符串再查，ref 才算得一致。
+    const uid = userid == null ? undefined : String(userid)
+    const found = serviceUrlOf(service, uid)
     if (!found) return null
     const ref = mcpRef(service, found.userid)
     const cached = mcpPool.get(ref)
     if (cached) return cached
-    const url = await secrets.resolve(ref)
+    let url = await secrets.resolve(ref)
+    if (!url) {
+      // 凭据库没读到（新机冷启动 / 凭据只写进了 config 明文 / 服务晚就绪）：
+      // config 里的 URL 同样经过面板校验，拿来兜底，总比直接「没配」强。
+      url = found.url
+      if (url) log?.warn?.(`${service} 凭据没读到，临时用配置里的 URL（建议重新填写一次凭据）`)
+    }
     if (!url) return null
     const client = createMcpClient(url, { log: logger.child('mcp:' + service) })
     mcpPool.set(ref, client)
@@ -266,19 +289,22 @@ export function apply(ctx) {
       const completed = d.reason && d.reason.kind === 'completed'
       const text = st.lastTurn === d.turn ? st.text : ''
       const frame = st.frame
-      turnState.delete(sid)
+      // 条件删除：只删自己这一轮的槽位，绝不误删后一轮的（成本极低，双保险）
+      if (turnState.get(sid) === st) turnState.delete(sid)
+      // 回复真正发出后才放行同一会话排队的下一条消息
+      const done = () => { try { st.finishTurn?.() } catch {} }
       if (!completed) {
         const detail = String(d.reason?.error?.message || d.reason?.failure?.message || '').replace(/\s+/g, ' ').slice(0, 180)
         log.warn(`${st.chat.chatId} 这一轮没正常结束（${d.reason?.kind || '?'}${detail ? '：' + redact(detail) : ''}）`)
-        fireAndForget(replyTo(frame, '这次没跑完，出错了。再试一次？'), '回复出错提示', log)
+        fireAndForget(replyTo(frame, '这次没跑完，出错了。再试一次？').finally(done), '回复出错提示', log)
         return
       }
       if (isSilence(text)) {
         log.info(`${st.chat.chatId} 这一轮不说话`)
-        fireAndForget(replyTo(frame, '', true), '回复静默', log)
+        fireAndForget(replyTo(frame, '', true).finally(done), '回复静默', log)
         return
       }
-      fireAndForget(replyTo(frame, clip(text)), '回复消息', log)
+      fireAndForget(replyTo(frame, clip(text)).finally(done), '回复消息', log)
     }
   }
 
@@ -308,13 +334,15 @@ export function apply(ctx) {
         who: 'bot',
         text,
       })
+      // 灵活整理模式按「最后一条消息」计时，机器人自己的回复也算一条
+      consolidator.noteActivity()
     } catch (error) {
       log.error(`回复失败：${error.message}`)
     }
   }
 
   // ---------- 记忆上下文（每轮拼一小段）----------
-  // 这段必须挂进系统提示词才有用 —— cordis.patch.yml 三个 preset 的 prefix
+  // 这段必须挂进系统提示词才有用 —— cordis.patch.yml 两个 preset 的 prefix
   // 里都要有 {{wecom_context}}，否则模型根本不知道自己有记性，tool 白挂。
   //
   // 空库也要注入：以前 `if (!s.total) return ''`，结果是「先有记忆才提示，
@@ -453,6 +481,8 @@ export function apply(ctx) {
       who: 'user',
       text: merged,
     })
+    // 灵活整理模式按「最后一条消息」计时
+    consolidator.noteActivity()
 
     let info
     try {
@@ -474,38 +504,55 @@ export function apply(ctx) {
     if (chat.kind === 'group' && cfg.history.enabled) {
       fireAndForget(backfill.fill(chat, sid, { reason: '这个群在你上次被叫之后又聊了这些' }), '补群历史', log, 'debug')
     }
-    // 记下这一轮的状态：等 turn/end 再发
-    turnState.set(sid, { chat, frame, text: '', lastTurn: -1, startedAt: Date.now(), said: merged })
+    // 这一轮要串行到「回复真正发出」为止：长任务 A 还在跑时来一条消息 B，
+    // B 会排在队列里，不会覆盖 turnState 里 A 的槽位（覆盖会让 A 的 req_id 丢失）。
+    await runTurn(sid, async () => {
+      let resolveTurn
+      const turnDone = new Promise((resolve) => { resolveTurn = resolve })
+      let settled = false
+      const finishTurn = () => { if (!settled) { settled = true; resolveTurn() } }
+      turnState.set(sid, { chat, frame, text: '', lastTurn: -1, startedAt: Date.now(), said: merged, finishTurn })
 
-    // 附件
-    const attachments = []
-    for (const img of first.images || []) {
-      attachments.push({ type: 'image', attachment: await admitImage(img) })
-    }
-    let promptText = merged
-    for (const f of first.files || []) {
-      const p = saveInboundFile(first, f)
-      if (p) promptText += `\n\n[对方发来一个文件，已存到：${p}]`
-    }
-    // 说话人 → 「你记得关于他的事」。
-    // 这一小段必须挂在当轮用户消息里，不能进系统提示：系统提示每轮都会追加一份
-    // 运行时上下文快照，内容一变就多一份快照，历史会越滚越大（413 就是这么来的）。
-    if (cfg.features.memory) promptText = `${whoLine(chat)}\n\n${promptText}`
+      // 附件
+      const attachments = []
+      for (const img of first.images || []) {
+        attachments.push({ type: 'image', attachment: await admitImage(img) })
+      }
+      let promptText = merged
+      for (const f of first.files || []) {
+        const p = saveInboundFile(first, f)
+        if (p) promptText += `\n\n[对方发来一个文件，已存到：${p}]`
+      }
+      // 说话人 → 「你记得关于他的事」。
+      // 这一小段必须挂在当轮用户消息里，不能进系统提示：系统提示每轮都会追加一份
+      // 运行时上下文快照，内容一变就多一份快照，历史会越滚越大（413 就是这么来的）。
+      if (cfg.features.memory) promptText = `${whoLine(chat)}\n\n${promptText}`
 
-    try {
-      await hub.prompt(chat, promptText, { attachments: attachments.filter((a) => a && a.attachment) })
-      addUsage(chatKey, estimateTokens(promptText) + 300)
-      tickMinute(chatKey)
-    } catch (error) {
-      log.error(`投递失败：${error.message}`)
-      turnState.delete(sid)
-      await replyTo(frame, '我这边把消息送进会话失败了，稍后再试一次。')
-    }
+      // 兜底：万一 turn/end 没来（中断/异常），10 分钟后也放行，别让队列永久卡死
+      const guard = setTimeout(finishTurn, 10 * 60_000)
+      try {
+        await hub.prompt(chat, promptText, { attachments: attachments.filter((a) => a && a.attachment) })
+        addUsage(chatKey, estimateTokens(promptText) + 300)
+        tickMinute(chatKey)
+        // 等 turn/end 把这一轮的回复真正发出去，才放同一会话的下一条（保证 req_id 不串）
+        await turnDone
+      } catch (error) {
+        log.error(`投递失败：${error.message}`)
+        if (turnState.get(sid)?.finishTurn === finishTurn) turnState.delete(sid)
+        await replyTo(frame, '我这边把消息送进会话失败了，稍后再试一次。')
+      } finally {
+        clearTimeout(guard)
+        finishTurn()
+      }
+    })
   }
 
   async function admitImage(img) {
     try {
-      const content = [{ type: 'image', source: { type: 'base64', mediaType: img.mimeType, data: Buffer.from(img.data).toString('base64') } }]
+      // 内核 @deepseek-ai/dsh-attachment 只读顶层 data/source 之外的扁平字段：
+      // isEncodedImage 认 type:'image'，saveInput 直接读 image.data → Buffer.from(base64)。
+      // 之前塞在 source.data 里会被读成 undefined → Buffer.from(undefined) 抛错被吞 → 图变 [图片]。
+      const content = [{ type: 'image', data: Buffer.from(img.data).toString('base64'), mediaType: img.mimeType }]
       const admitted = await ctx.attachments?.admitPromptContent?.(content)
       return Array.isArray(admitted) ? admitted[0] : null
     } catch (error) {
@@ -587,6 +634,16 @@ export function apply(ctx) {
       await replyTo(frame, deniedReply(chat, chat.userId))
       // 管理员还没绑定任何人的话，把首个私聊者的 ID 直接告诉他，方便填进面板
       return
+    }
+
+    // 自动学名字：群里只有被 @ 才会回调，@ 前缀就是机器人当前的名字。
+    // 只在没手动配 botName 时学，且只写到 observedBotName（不回填门牌 botName，
+    // 否则剥 @ 前缀和规则里的门牌都跟着变，身份分层就塌了）。
+    // 学到的名字只在 default 人格里替换 {{name}}；写盘去重，名字没变就不动。
+    const learned = String(message.mentionName || '').trim()
+    if (learned && !String(cfg.botName || '').trim() && learned !== String(cfg.observedBotName || '').trim()) {
+      cfg = saveConfig({ ...cfg, observedBotName: learned })
+      log.info(`从群消息 @ 前缀学到机器人名字：${learned}`)
     }
 
     // 附件：图片所有会话都收；视频所有会话都收；普通文件只收私聊。
@@ -676,6 +733,13 @@ export function apply(ctx) {
   let videoReport = null // 给面板/自检用：挂上了什么、为什么没挂上
   fireAndForget(videoReady.then((r) => { videoReport = r }), '视频能力自检', log, 'debug')
 
+  // 长任务工具（jobs/schedule）常挂在 wecom-owner preset 里，不再随开关换 preset。
+  // 关掉长任务时用 tools.restrict({deny}) 在「这个 agent 的 scope」把它们藏掉；
+  // 打开时解除 restriction。restrict 必须走 agent.ctx.tools —— 它内部用 scopeOf(this.ctx)
+  // 定位作用域，插件 ctx 上调用会误伤全局。这些工具是 preset 继承来的，属 restrictable，
+  // 能被藏；而本插件自己 register 的 wecom/browser/video 工具是 agent scope 的 own，豁免。
+  const LONG_TASK_TOOLS = ['job_output', 'job_list', 'job_kill', 'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit']
+
   /** 给某个 agent 挂工具（工具清单变了才重挂，避免前缀缓存失效） */
   const mounted = new Map()
   // 同一个会话的挂载必须串行：mountTools 在工具清单算完之前有 await，
@@ -708,10 +772,16 @@ export function apply(ctx) {
   }
   async function mountToolsNow(agent, chat, level, sid) {
     const list = await toolsFor(level, chat)
-    const key = list.map((t) => t.name).sort().join(',') + '|' + level
+    // 长任务关掉时要在主人私聊里藏掉 jobs/schedule —— 这个状态进 key，
+    // 开关一变下次来消息就重算（restrict 是加/解，必须成对）
+    const longOff = level === 'owner' && !cfg.longTasks
+    const key = list.map((t) => t.name).sort().join(',') + '|' + level + '|long:' + (longOff ? 'off' : 'on')
     const prev = mounted.get(sid)
     if (prev && prev.agent === agent && prev.key === key) return
-    if (prev) for (const off of prev.offs) { try { off() } catch {} }
+    if (prev) {
+      for (const off of prev.offs) { try { off() } catch {} }
+      if (prev.restrictOff) { try { prev.restrictOff() } catch {} }
+    }
     const offs = []
     const failed = []
     for (const tool of list) {
@@ -723,11 +793,23 @@ export function apply(ctx) {
         log.warn(`工具 ${tool.name} 挂不上：${error.message}`)
       }
     }
+    // 长任务关闭：在主人 agent 自己的 scope 把 jobs/schedule 工具藏掉。
+    // 这些工具是 preset 挂在祖先 scope 的，属 restrictable，能被 deny；
+    // 本插件 register 的 wecom/browser/video 是 agent scope 自己的，不受影响。
+    // 工具没挂上的组合（如某种精简 mode）restrict 会抛 unknown，catch 掉即可（本来就没有）。
+    let restrictOff = null
+    if (longOff) {
+      try {
+        restrictOff = agent.ctx.tools.restrict({ deny: LONG_TASK_TOOLS })
+      } catch (error) {
+        log.debug(`长任务工具屏蔽跳过：${error.message}`)
+      }
+    }
     if (failed.length) {
       // 挂不上的工具留在自检里，面板上能看到「说接上了、实际没挂上」
       videoReport = { ...(videoReport || {}), mountFailed: failed }
     }
-    mounted.set(sid, { agent, key, offs })
+    mounted.set(sid, { agent, key, offs, restrictOff })
   }
   // 同一个会话排队挂，谁先算完谁先挂，后进来的看到的一定是已挂好的状态。
   function mountTools(agent, chat, level, sid) {
@@ -802,7 +884,7 @@ export function apply(ctx) {
     guideDone: cfg.guideDone,
     accessMode: cfg.accessMode,
     admins: cfg.admins.length,
-    vault: secrets.kind,
+    vault: secrets.kind(),
     dataDir: DATA_DIR,
     // 自检：这三项以前只能靠翻 plugin.log 猜，面板上必须能直接看到
     video: videoSelfCheck(),
@@ -1055,9 +1137,12 @@ export function apply(ctx) {
   route('/admin/mcp', async (req) => {
     const body = await readBody(req)
     const { userid, service, url } = body
-    if (!adminList().some((a) => a.userid === userid)) return { ok: false, message: '没这个管理员' }
+    // userid 口径归一：配置里存的是字符串，前端/工具偶尔传数字。
+    // 严格相等会误判「没这个管理员」→ 重新填写直接失败，正是这次要修的症状。
+    const uid = String(userid ?? '')
+    if (!adminList().some((a) => a.userid === uid)) return { ok: false, message: '没这个管理员' }
     if (!MCP_SERVICES.some((s) => s.id === service)) return { ok: false, message: '没这个服务' }
-    const ref = mcpRef(service, userid)
+    const ref = mcpRef(service, uid)
     // 凭据服务是 async 的：必须 await 且接住错误。原来没 await，svc.set 一 reject
     // 就变成 unhandledRejection —— Node 默认直接杀掉整个进程，连累 DSH 里所有别的会话。
     // 现在失败只让这一个面板操作返回 ok:false。
@@ -1065,13 +1150,20 @@ export function apply(ctx) {
       if (!url) {
         await secrets.unset(ref)
         mcpPool.delete(ref)
-        return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, ''))) }
+        return { ok: true, config: publicConfig(setConfig(setAdminMcp(uid, service, ''))) }
       }
       const v = validateMcpUrl(url, service)
       if (!v.ok) return { ok: false, message: v.message }
       await secrets.set(ref, url)
       mcpPool.delete(ref)
-      return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, url))) }
+      // 写后回读：确认这次填写真的能被读回来（口径/类型错误在这里就暴露）。
+      const saved = await secrets.resolve(ref)
+      return {
+        ok: true,
+        config: publicConfig(setConfig(setAdminMcp(uid, service, url))),
+        ...(saved === url ? {} : { warning: '凭据已写但回读不一致，请检查凭据服务' }),
+        ...(secrets.kind() === 'memory' ? { warning: '凭据只存内存，重启 DSH 后会丢——请等凭据服务就绪后重填' } : {}),
+      }
     } catch (error) {
       return { ok: false, message: `存凭据失败：${error.message}` }
     }

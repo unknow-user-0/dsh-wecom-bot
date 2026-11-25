@@ -41,6 +41,9 @@ function saveState(s) {
 export function createConsolidator({ dsh, getConfig, log }) {
   let busy = false
   let lastError = ''
+  // 灵活模式用的两个内存水位（重启归零没关系：流水还在，下一条消息会重新计时）
+  let lastActivityAt = 0   // 最近一条消息进流水的时间
+  let lastFlexTriggeredAt = 0 // 最近一次灵活整理触发的时间（成功失败都记，用来退避）
 
   /** 现在有没有条件跑：开着、有模型、有流水 */
   function ready() {
@@ -60,7 +63,10 @@ export function createConsolidator({ dsh, getConfig, log }) {
       busy,
       enabled: !!cfg.features.memory,
       auto: cfg.memory?.autoDistill !== false,
-      times: cfg.memory?.distillTimes || ['04:00'],
+      mode: cfg.memory?.mode === 'flexible' ? 'flexible' : 'scheduled',
+      times: cfg.memory?.distillTimes || ['17:00'],
+      flexIdleSec: cfg.memory?.flexIdleSec ?? 180,
+      flexMinGapSec: cfg.memory?.flexMinGapSec ?? 900,
       model: model ? `${model.provider} / ${model.model}` : '',
       modelFromConfig: !!(cfg.model && cfg.model.provider),
       lastError,
@@ -162,19 +168,47 @@ export function createConsolidator({ dsh, getConfig, log }) {
     }
   }
 
-  /** 每分钟调一次，到点就跑。同一天同一个时间点只跑一次。 */
+  /** 有一条消息进了流水就打一下点，灵活模式据此算「聊完多久」 */
+  function noteActivity() {
+    lastActivityAt = Date.now()
+  }
+
+  /** 每分钟调一次：定时模式到点跑，灵活模式聊完静默一会儿跑。 */
   async function tick() {
     const cfg = getConfig()
     if (!cfg.features.memory || cfg.memory?.autoDistill === false) {
       // 功能关着/自动整理关着时绝不 prune：这些流水还没提炼过，删了就永久没了。
       return
     }
+    if (cfg.memory?.mode === 'flexible') return tickFlexible(cfg)
+    return tickScheduled(cfg)
+  }
+
+  /**
+   * 灵活模式：最后一条消息静默够 flexIdleSec 就整理，两次至少隔 flexMinGapSec。
+   * 触发过就把活动水位清零，下次要有新消息才重新计时 —— 成功失败都清，
+   * 免得欠费/模型挂了时每隔 flexMinGapSec 就自动调一次模型烧 token（硬约束 3）。
+   * 失败的原料不删、processed 水位不动，用户恢复后发条消息或点「现在整理」就能补上。
+   */
+  async function tickFlexible(cfg) {
+    const now = Date.now()
+    if (!lastActivityAt) return                                   // 还没聊过
+    if (now - lastActivityAt < (cfg.memory.flexIdleSec ?? 180) * 1000) return       // 还没静默够
+    if (now - lastFlexTriggeredAt < (cfg.memory.flexMinGapSec ?? 900) * 1000) return // 离上次太近
+    const r = await run({ includeToday: true })
+    if (r.ok || r.attempted) lastFlexTriggeredAt = now
+    // 无论结果如何都清水位：失败也不周期性重试（欠费时每 10 分钟调一次模型同样是烧钱）
+    lastActivityAt = 0
+  }
+
+  /** 定时模式：到点就跑，同一天同一个时间点只跑一次。 */
+  async function tickScheduled(cfg) {
     const st = loadState()
     const today = chatlog.dayKey()
     const now = new Date()
     const mins = now.getHours() * 60 + now.getMinutes()
     const runs = st.runs || {}
-    const due = (cfg.memory?.distillTimes || ['04:00']).filter((t) => {
+    const due = (cfg.memory?.distillTimes || ['17:00']).filter((t) => {
       const [hh, mm] = String(t).split(':').map(Number)
       return mins >= hh * 60 + mm && runs[t] !== today
     })
@@ -194,7 +228,7 @@ export function createConsolidator({ dsh, getConfig, log }) {
     }
   }
 
-  return { run, tick, status, ready }
+  return { run, tick, status, ready, noteActivity }
 }
 
 function describe(s) {

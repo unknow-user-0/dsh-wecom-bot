@@ -46,8 +46,20 @@ export function stripMention(text, botName) {
 }
 
 /**
- * @returns {{ chat, text, images, files, msgid, reqId, raw }}
+ * 从群消息开头抽出「@名字」。只取名字本身，剥前缀交给 stripMention。
+ * 要求至少 2 字：单字更可能是正文，抓错会把人名写进人格。
+ */
+function mentionNameFrom(raw) {
+  const s = String(raw ?? '')
+  if (!s.startsWith('@')) return ''
+  const m = /^@([^\s\u3000:：,，]{2,20})/.exec(s)
+  return m ? m[1] : ''
+}
+
+/**
+ * @returns {{ chat, text, images, files, msgid, reqId, mentionName, raw }}
  *   chat = { kind:'dm'|'group', chatId, userId, displayName, groupName }
+ *   mentionName = 群消息 @ 前缀里的机器人名（供没配名字时自动学习）
  */
 export function normalizeInbound(frame, { botName = '' } = {}) {
   const body = frame.body || {}
@@ -66,6 +78,11 @@ export function normalizeInbound(frame, { botName = '' } = {}) {
 
   const msgtype = String(body.msgtype || '')
   let text = ''
+  // 群 text 消息开头必带 @机器人名（群里只有被 @ 才会回调），抽出来供自动学名字用
+  let mentionName = ''
+  if (kind === 'group' && msgtype === 'text') {
+    mentionName = mentionNameFrom(body.text?.content)
+  }
   if (msgtype === 'text') text = String(body.text?.content ?? '')
   else if (msgtype === 'image') text = '[图片]'
   else if (msgtype === 'file') text = '[文件]'
@@ -88,6 +105,7 @@ export function normalizeInbound(frame, { botName = '' } = {}) {
     msgid: String(body.msgid || ''),
     reqId: frame.headers?.req_id || '',
     msgtype,
+    mentionName,
     raw: body,
   }
 }

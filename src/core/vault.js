@@ -29,11 +29,18 @@ export function mcpRef(service, userid) {
 const memory = new Map()
 
 export function createVault(ctx, log) {
-  const svc = ctx.get?.('credentials') || ctx.credentials
+  // 凭据服务可能比本插件晚就绪（新机冷启动尤其明显）。
+  // 旧写法 `const svc = ctx.get?.(...) || ctx.credentials` 在 apply 那一刻就把
+  // undefined 固化进闭包：之后所有 set 只写内存镜像、不落宿主凭据库，重启即丢，
+  // 表现正是「重新填写后当时能用、再开又不行」。改为每次调用现取，服务一就绪自动用上。
+  const getSvc = () => {
+    try { return ctx.get?.('credentials') || ctx.credentials } catch { return ctx.credentials }
+  }
 
   async function set(ref, value) {
     const v = String(value ?? '')
     if (!v) return unset(ref)
+    const svc = getSvc()
     // 先写内存镜像：面板/长连接里的同步分支（peek）立刻能读到，
     // 不用等宿主凭据库那次 await 回来
     memory.set(ref, v)
@@ -46,6 +53,7 @@ export function createVault(ctx, log) {
   }
 
   async function resolve(ref) {
+    const svc = getSvc()
     if (svc && typeof svc.resolve === 'function') {
       try {
         const r = await svc.resolve(ref)
@@ -65,6 +73,7 @@ export function createVault(ctx, log) {
 
   async function unset(ref) {
     memory.delete(ref)
+    const svc = getSvc()
     if (svc && typeof svc.unset === 'function') {
       try { await svc.unset(ref) } catch {}
     }
@@ -91,6 +100,9 @@ export function createVault(ctx, log) {
       return true
     },
     has: async (ref) => Boolean(await resolve(ref)),
-    kind: svc && typeof svc.set === 'function' ? 'service' : 'memory',
+    kind: () => {
+      const svc = getSvc()
+      return svc && typeof svc.set === 'function' ? 'service' : 'memory'
+    },
   }
 }

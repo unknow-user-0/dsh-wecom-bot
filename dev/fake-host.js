@@ -14,6 +14,7 @@ export function createFakeHost(opts = {}) {
   const sessions = new Map()      // sessionId → { events: [], appended: [], prompts: [] }
   const variables = new Map()
   const tools = new Map()
+  const restricts = []
   const createCalls = []
 
   const ctx = {
@@ -101,7 +102,11 @@ export function createFakeHost(opts = {}) {
         tools.set(tool.name, tool)
         return () => tools.delete(tool.name)
       },
-      restrict() { return () => {} },
+      restrict(filter) {
+        const rec = { filter, active: true }
+        restricts.push(rec)
+        return () => { rec.active = false }
+      },
     },
   }
 
@@ -147,7 +152,7 @@ export function createFakeHost(opts = {}) {
   }
 
   return {
-    ctx, routes, sessions, variables, tools, createCalls, log, listeners,
+    ctx, routes, sessions, variables, tools, restricts, createCalls, log, listeners,
     get service() { return services },
     /** 测试用：后注入/替换服务（比如临时把 llm 换成一个会抛错的假货） */
     inject(name, value) { services[name] = value; ctx[name] = value },

@@ -391,10 +391,11 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       // 传整个对象的话，在「功能」页改浏览器，圆点会亮在「自我」上 —— 假信号
       // 会让这个圆点彻底不可信，所以按具体字段列，用点路径取。
       const TAB_KEYS = {
-        connect: ['botId', 'botName', 'longTasks', 'quota'],
-        users: ['admins', 'accessMode', 'allow', 'autoRegister',
+        connect: ['botId', 'quota'],
+        users: ['admins', 'longTasks', 'accessMode', 'allow', 'autoRegister',
           'merge.enabled', 'merge.waitSec', 'merge.maxSec', 'merge.groupWaitSec', 'merge.groupMaxSec'],
-        self: ['persona', 'features.memory'],
+        self: ['persona', 'botName', 'features.memory', 'memory.autoDistill', 'memory.mode',
+          'memory.distillTimes', 'memory.flexIdleSec', 'memory.flexMinGapSec'],
         features: ['features.browser', 'features.sendFileToUser', 'history',
           'merge.placeholder', 'merge.placeholderOn', 'merge.placeholderImage', 'merge.placeholderImageOn'],
       }
@@ -518,7 +519,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 连接 ----------------
-    function Connect({ cfg, st, setD, quickToggle, toast, reload }) {
+    function Connect({ cfg, st, quickToggle, toast, reload }) {
       const [botId, setBotId] = useState(cfg.botId || '')
       const [secret, setSecret] = useState('')
       const [busy, setBusy] = useState(false)
@@ -546,29 +547,18 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Btn, { kind: 'primary', onClick: () => void doConnect(), disabled: busy || !botId.trim() }, busy ? '连接中…' : '保存并连接'),
             h(Btn, { kind: 'ghost', onClick: async () => { await post('/disconnect'); toast('已断开', 'ok'); void reload() } }, '断开'),
             h('span', { className: cx('wb-tag', st.connected ? 'ok' : 'err') }, st.connected ? '当前：已连接' : '当前：' + (st.reason || '没连上')))),
-        h(Card, { title: '机器人名字与长任务', hint: '这个名字有两个用处：把群消息开头的「@名字」去掉，以及告诉模型「别人用这个称呼喊你」。它是门牌，不是身份 —— 身份由「自我」页的人格决定，两者同时存在不冲突。填错的话，别人 @ 它它可能认不出来。长任务档位只对主人私聊生效（第一个管理员），普通管理员私聊不受影响。' },
-          h('div', { className: 'wb-grid' },
-            h(Field, { label: '企微里 @ 它用的名字' },
-              h('input', { className: 'wb-input', value: cfg.botName || '', placeholder: '和企业微信后台显示名保持一致', onChange: (e) => setD('botName', e.target.value) })),
-            h('div', { className: 'wb-field' },
-              h('label', null,
-                '主人私聊长任务档位',
-                h(Tip, { text: '只影响主人私聊（第一个管理员）。开：多挂两套工具 —— 后台任务（长活丢后台，你先聊别的，跑完再取结果）和定时任务（让它到点自己干活）。关：一轮一答，长活会一直占着会话没法回你。' })),
-              h('div', { className: 'wb-switch-row' },
-                h(Switch, { on: !!cfg.longTasks, onChange: (v) => setD('longTasks', v) }),
-                h('span', { className: 'lbl' }, cfg.longTasks ? '开（有 jobs / schedule）' : '关（一轮一答）')))),
-        h(Card, { title: '会话映射', hint: '每个私聊 / 每个群一个 DSH 会话，落在「企业微信 · AI」工作区里。' },
+        h(Card, { title: '会话映射', hint: '每个私聊 / 每个群一个 DSH 会话，落在「企业微信 · AI」工作区里。同一个人会有一个私聊会话，加上他在每个群 @ 机器人时各一个群会话，所以一人多条是正常的。' },
           rows.length
             ? h('div', { className: 'wb-list' }, rows.map((r) => h('div', { key: r.key, className: 'wb-item' },
               h('span', { className: cx('wb-tag', 'brand') }, r.level === 'owner' ? '主人档' : '社交档'),
               h('div', { className: 'main' },
                 h('div', { className: 't' }, r.title || r.key),
                 h('div', { className: 'd wb-mono' }, r.sessionId || '')))))
-            : h(Empty, null, '还没有会话。等第一条消息进来就会建。'))))
+            : h(Empty, null, '还没有会话。等第一条消息进来就会建。')))
     }
 
     // ---------------- 管理员 ----------------
-    function Admins({ cfg, toast, reload, services }) {
+    function Admins({ cfg, draft, setD, toast, reload, services }) {
       const [userid, setUserid] = useState('')
       const [name, setName] = useState('')
       const [open, setOpen] = useState('')
@@ -633,7 +623,15 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
                 h(Btn, { sm: true, onClick: () => void test(a.userid, mcpTab), disabled: testing }, testing ? '测…' : '测一下'),
                 h(Btn, { sm: true, kind: 'ghost', onClick: () => { setMcpUrl(''); void setOne(a.userid, mcpTab, '') } }, '清空'),
                 a.mcp?.[mcpTab] ? h('span', { className: 'wb-tag ok' }, '已配') : h('span', { className: 'wb-tag' }, '没配'))) : null)))
-            : h(Empty, null, '还没加管理员。没有管理员，机器人不会认任何人是主人。')))
+            : h(Empty, null, '还没加管理员。没有管理员，机器人不会认任何人是主人。')),
+        h(Card, { title: '主人私聊长任务档位', hint: '只影响主人私聊（第一个管理员），普通管理员私聊不受影响。' },
+          h('div', { className: 'wb-field' },
+            h('label', null,
+              '主人私聊长任务档位',
+              h(Tip, { text: '只影响主人私聊（第一个管理员）。开：多挂两套工具 —— 后台任务（长活丢后台，你先聊别的，跑完再取结果）和定时任务（让它到点自己干活）。关：一轮一答，长活会一直占着会话没法回你。' })),
+            h('div', { className: 'wb-switch-row' },
+              h(Switch, { on: !!(draft?.longTasks ?? cfg.longTasks), onChange: (v) => setD('longTasks', v) }),
+              h('span', { className: 'lbl' }, (draft?.longTasks ?? cfg.longTasks) ? '开（有 jobs / schedule）' : '关（一轮一答）')))))
     }
 
     // ---------------- 准入 ----------------
@@ -813,6 +811,13 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         h(Card, { title: '人格和企微名字的关系', hint: '' },
           h('div', { className: 'wb-note' },
             '这里写它真正是谁 —— 想怎么写名字就怎么写。企微那边的名字只是门牌：别人用那个喊它，它答应；问它是谁，它还是答这里的自己。门牌和住户同时存在不矛盾，不用为了统一而删掉哪一边。')),
+        h(Card, { title: '企微里 @ 它用的名字（门牌）', hint: '留空会自动从群里别人 @ 它的名字学一个，学到的名字只在「默认人格」里当自称用，不会改你写的其他人格。想固定就手动填。' },
+          h('div', { className: 'wb-grid' },
+            h(Field, { label: '企微里 @ 它用的名字' },
+              h('input', { className: 'wb-input', value: draft?.botName ?? cfg.botName ?? '', placeholder: '留空则自动从群消息 @ 前缀学习', onChange: (e) => setD('botName', e.target.value) }))),
+          !String(draft?.botName ?? cfg.botName ?? '').trim() && cfg.observedBotName
+            ? h('div', { className: 'wb-hint', style: { marginTop: 8 } }, '当前从群里学到的名字：' + cfg.observedBotName)
+            : null),
         h(Card, { title: '选人格', hint: '人格就是系统提示词的前半段，决定它是什么脾气、怎么说话。改完下一轮就生效，不用重启。' },
           rows.length
             ? h('div', { className: 'wb-list' }, rows.map((p) => h('div', { key: p.id, className: 'wb-item' },
@@ -976,10 +981,16 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       return h('div', { style: { marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.2))' } },
         h('div', { className: 'wb-between' },
           h('div', null,
-            h('div', null, '再回一张图'),
+            h('div', null, '收到消息先回一张图'),
             h('div', { className: 'wb-dim wb-small' },
-              has ? '文字和图都开就是都发；只开图就只发图' : '没人发图就是只发文字')),
+              '模型回复要等几秒，先发张图/一句话，对方就知道消息收到了（文字在「合并转发」里配）。')),
           h(Switch, { on: imageOn, onChange: (v) => setD('merge.placeholderImageOn', v) })),
+
+        // 前置条件放在选图按钮之前：没配上传服务，选了也发不出去，别等选完才发现。
+        st && st.hasUpload === false && imageOn
+          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 8, color: 'var(--dsw-alias-warning, #b7791f)' } },
+            '发图前先在「连接」里配一个 disk / mail / doc 服务：企微只认 media_id，图要先上传换 id。没配的话图发不出去，只会发文字。')
+          : null,
 
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' } },
           h('input', {
@@ -1020,12 +1031,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             '注意：动图发到手机企微聊天窗里默认不会播放')
           : null,
 
-        // 没配 disk/mail/doc 之一的人：图存得住但发不出去，必须提前说，
-        // 否则他配完一圈以为好了，实际对方只收到 emmm...
-        st && st.hasUpload === false
-          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 8, color: 'var(--dsw-alias-warning, #b7791f)' } },
-            '发图要先配一个 disk / mail / doc 服务（企微只认 media_id，图得先上传换 id）。没配的话图发不出去，只会发文字。')
-          : null,
         st?.lastImageError
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6, color: 'var(--dsw-alias-warning, #b7791f)' } },
             '上次发图失败：' + st.lastImageError)
@@ -1358,18 +1363,49 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 
         // 自动整理：每天到点把当天的聊天流水提炼成记忆。这是唯一会周期性花 token 的功能，
         // 所以默认开、但必须让人看得见、关得掉。
-        h(Card, { title: '自动整理', hint: '每天到点把当天的聊天提炼成长期记忆。整理要调一次模型，会花一点 token。' },
+        h(Card, { title: '自动整理', hint: '把聊天流水提炼成长期记忆，整理要调一次模型会花一点 token。两种节奏：定时=每天固定时间点；灵活=聊完静默一会儿就整理（会比定时消耗更多 token）。' },
           h('div', { className: 'wb-between', style: { marginBottom: 10 } },
             h('div', null,
-              h('div', null, '每天自动整理'),
-              h('div', { className: 'wb-dim wb-small' }, st?.auto ? `到点就跑：${(st.times || []).join(' / ')}` : '关着，只能手动点')),
+              h('div', null, '自动整理'),
+              h('div', { className: 'wb-dim wb-small' }, draft.memory?.autoDistill === false
+                ? '关着，只能手动点'
+                : draft.memory?.mode === 'flexible' ? '灵活：聊完静默一会儿就整理' : `定时：${(draft.memory?.distillTimes || st?.times || ['17:00']).join(' / ')}`)),
             h(Switch, { on: draft.memory?.autoDistill !== false, onChange: (v) => setD('memory.autoDistill', v) })),
           h('div', { className: 'wb-row', style: { marginBottom: 10 } },
+            h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } }, '整理节奏'),
+            h('select', {
+              className: 'wb-input', style: { width: 160 },
+              value: draft.memory?.mode === 'flexible' ? 'flexible' : 'scheduled',
+              onChange: (e) => setD('memory.mode', e.target.value),
+            },
+              h('option', { value: 'scheduled' }, '定时（固定时间点）'),
+              h('option', { value: 'flexible' }, '灵活（聊完再整理）')),
+            h('span', { className: 'wb-small wb-dim' }, '两种模式可随时切换')),
+          draft.memory?.mode === 'flexible' ? h('div', null,
+            h('div', { className: 'wb-small wb-dim', style: { marginBottom: 8 } },
+              '灵活模式每聊完就多调一次模型，固定开销会重复付，通常比定时模式更费 token。'),
+            h('div', { className: 'wb-row', style: { marginBottom: 10 } },
+              h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center', width: 90 } }, '聊完多久后整理'),
+              h('input', {
+                className: 'wb-input', style: { width: 90 }, type: 'number', min: 0.5, max: 360, step: 'any',
+                value: (draft.memory?.flexIdleSec ?? 180) / 60,
+                onChange: (e) => setD('memory.flexIdleSec', Math.max(30, Math.round((Number(e.target.value) || 3) * 60))),
+              }),
+              h('span', { className: 'wb-small wb-dim' }, '分钟（最后一条消息后的静默时间，默认3分钟）')),
+            h('div', { className: 'wb-row', style: { marginBottom: 10 } },
+              h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center', width: 90 } }, '两次整理间隔'),
+              h('input', {
+                className: 'wb-input', style: { width: 90 }, type: 'number', min: 0.5, max: 1440, step: 'any',
+                value: (draft.memory?.flexMinGapSec ?? 900) / 60,
+                onChange: (e) => setD('memory.flexMinGapSec', Math.max(30, Math.round((Number(e.target.value) || 15) * 60))),
+              }),
+              h('span', { className: 'wb-small wb-dim' }, '分钟（防接连反复整理，默认15分钟）'))
+          ) : h('div', { className: 'wb-row', style: { marginBottom: 10 } },
             h('span', { className: 'wb-small wb-dim', style: { alignSelf: 'center' } }, '几点整理'),
             h('input', {
               className: 'wb-input', style: { width: 90 },
-              value: (draft.memory?.distillTimes || ['04:00']).join(','),
-              placeholder: '04:00',
+              value: (draft.memory?.distillTimes || ['17:00']).join(','),
+              placeholder: '17:00',
               onChange: (e) => setD('memory.distillTimes', e.target.value.split(/[,，\s]+/).filter(Boolean)),
             }),
             h('span', { className: 'wb-small wb-dim' }, '本地时间，可写多个用逗号隔开')),

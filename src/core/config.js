@@ -19,6 +19,7 @@ export const DEFAULTS = {
 
   // ---- 机器人 ----
   botName: '',             // 机器人在群里被 @ 时显示的名字（企微后台改完要来这里同步）
+  observedBotName: '',     // 从群消息 @ 前缀自动学到的名字（只在 default 人格里当 {{name}} 用，不回填 botName）
   botNameAliases: [],      // 以前叫过的名字。改名时自动记下，最多 5 条，用于告诉模型「那也是在叫我」
   botId: '',               // aibotid，连上后自动回填（非敏感，可存配置）
 
@@ -84,8 +85,12 @@ export const DEFAULTS = {
   // ---- 记忆 ----
   // 只控制「自动整理」的节奏。开关本身在 features.memory（面板上叫「启用记忆」）。
   memory: {
-    autoDistill: true,          // 每天自动整理一次
-    distillTimes: ['04:00'],    // 几点整理（本地时间，可多个）
+    autoDistill: true,          // 自动整理总开关
+    // 两种节奏二选一：scheduled=每天固定时间点；flexible=聊完静默一会儿就整理
+    mode: 'scheduled',
+    distillTimes: ['17:00'],    // 定时模式的整理时间点（本地时间，可多个）；默认下午5点
+    flexIdleSec: 180,           // 灵活模式：最后一条消息后静默多久才整理（秒，默认3分钟）
+    flexMinGapSec: 900,         // 灵活模式：两次整理最小间隔（秒，默认15分钟，防连着刷）
   },
 
   // ---- 人格 ----
@@ -171,9 +176,15 @@ function normalize(c) {
 
   // 记忆整理：时间点必须是 HH:MM，写错的时间点会让「到点就跑」永远不触发
   if (typeof c.memory.autoDistill !== 'boolean') c.memory.autoDistill = true
+  // 两种节奏：老的没有 mode 就按定时（保持原行为），取值非法也回退定时
+  if (!['scheduled', 'flexible'].includes(c.memory.mode)) c.memory.mode = 'scheduled'
   const times = Array.isArray(c.memory.distillTimes) ? c.memory.distillTimes : []
   const clean = times.map((t) => String(t || '').trim()).filter((t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t))
-  c.memory.distillTimes = clean.length ? [...new Set(clean)].slice(0, 4) : ['04:00']
+  c.memory.distillTimes = clean.length ? [...new Set(clean)].slice(0, 4) : ['17:00']
+  // 灵活模式的两个时间：静默多久（30s~6h）与两次最小间隔（30s~24h）。
+  // 老配置没有这两个键 → 用默认值（3分钟 / 15分钟），用户不改就不用管。
+  c.memory.flexIdleSec = num(c.memory.flexIdleSec, 30, 6 * 3600, 180)
+  c.memory.flexMinGapSec = num(c.memory.flexMinGapSec, 30, 24 * 3600, 900)
   // 提炼模型的坐标：provider/model 都空着 = 跟随默认。只填一个就等于没填（会退回跟随默认），
   // 免得半截配置让 resolveModel 拿到一个不存在的路由。
   const pm = c.model || {}

@@ -42,7 +42,8 @@ check('功能页关占位', (d) => { d.merge.placeholderOn = true }, ['features'
 check('用户页改准入阈值', (d) => { d.merge.waitSec = 9 }, ['users'])
 check('用户页改准入模式', (d) => { d.accessMode = 'open' }, ['users'])
 check('连接页改额度', (d) => { d.quota.enabled = false }, ['connect'])
-check('连接页改名字', (d) => { d.botName = 'x' }, ['connect'])
+check('自我页改名字', (d) => { d.botName = 'x' }, ['self'])
+check('用户页改长任务', (d) => { d.longTasks = true }, ['users'])
 check('自我页换人格', (d) => { d.persona.current = 'other' }, ['self'])
 
 // 反过来：没人动的键不许乱亮 —— 空改动必须一格都不亮

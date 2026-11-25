@@ -99,8 +99,11 @@ export function createHub({ ctx, log, getConfig }) {
   }
 
   // ---------- preset 选择 ----------
+  // 长任务开关不再换 preset：jobs/schedule 常挂在 wecom-owner 里，关掉时由
+  // host.js 的 mountTools 用 tools.restrict({deny}) 在会话层屏蔽。
+  // 这样改开关不再重建会话、不断上下文（preset 是会话级属性，一变就得换会话）。
   function presetFor(level, cfg) {
-    if (level === 'owner') return cfg.longTasks ? 'wecom-owner-long' : 'wecom-owner'
+    if (level === 'owner') return 'wecom-owner'
     return 'wecom-social'
   }
 

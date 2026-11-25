@@ -139,7 +139,12 @@ export function createPersona(id, { name, tags, body } = {}) {
  */
 export function personaText(cfg) {
   const p = readPersona(cfg.persona?.current || 'default')
-  const name = cfg.botName || ''
+  // 名字有两个来源：手动配的 botName（门牌），和从群消息 @ 前缀自动学到的名字。
+  // 学到的名字只在 default 人格里、且没手动配门牌时才用 —— 自定义人格不碰，
+  // 免得别人精心写的人格被一个群里的 @ 称呼悄悄改掉。
+  const configured = String(cfg.botName || '').trim()
+  const observed = String(cfg.observedBotName || '').trim()
+  const name = configured || (p.id === 'default' ? observed : '')
   if (!p.body.includes('{{name}}')) return p.body
   return p.body.replace(/\{\{name\}\}/g, name || '我')
 }
