@@ -699,8 +699,9 @@ export function apply(ctx) {
       return list
     }
     // social（群聊 / 非管理员私聊）：只能发消息、读本会话历史、记点东西、看视频。
-    // 没有文件、没有微盘、没有画图。
-    const list = wecomTools.filter((t) => !fileish(t))
+    // 没有文件、没有微盘、没有画图，也没有 adminOnly 工具（以主人身份调企微原生
+    // 能力 / 查任意会话历史）——那些一旦给群成员就是越权。
+    const list = wecomTools.filter((t) => !fileish(t) && !t.adminOnly)
     if (canBrowser) list.push(...browserTools)
     list.push(...video.ok)
     return list
@@ -1056,16 +1057,24 @@ export function apply(ctx) {
     const { userid, service, url } = body
     if (!adminList().some((a) => a.userid === userid)) return { ok: false, message: '没这个管理员' }
     if (!MCP_SERVICES.some((s) => s.id === service)) return { ok: false, message: '没这个服务' }
-    if (!url) {
-      secrets.unset(mcpRef(service, userid))
-      mcpPool.delete(mcpRef(service, userid))
-      return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, ''))) }
+    const ref = mcpRef(service, userid)
+    // 凭据服务是 async 的：必须 await 且接住错误。原来没 await，svc.set 一 reject
+    // 就变成 unhandledRejection —— Node 默认直接杀掉整个进程，连累 DSH 里所有别的会话。
+    // 现在失败只让这一个面板操作返回 ok:false。
+    try {
+      if (!url) {
+        await secrets.unset(ref)
+        mcpPool.delete(ref)
+        return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, ''))) }
+      }
+      const v = validateMcpUrl(url, service)
+      if (!v.ok) return { ok: false, message: v.message }
+      await secrets.set(ref, url)
+      mcpPool.delete(ref)
+      return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, url))) }
+    } catch (error) {
+      return { ok: false, message: `存凭据失败：${error.message}` }
     }
-    const v = validateMcpUrl(url, service)
-    if (!v.ok) return { ok: false, message: v.message }
-    secrets.set(mcpRef(service, userid), url)
-    mcpPool.delete(mcpRef(service, userid))
-    return { ok: true, config: publicConfig(setConfig(setAdminMcp(userid, service, url))) }
   })
   route('/mcp/test', async (req) => {
     const body = await readBody(req)

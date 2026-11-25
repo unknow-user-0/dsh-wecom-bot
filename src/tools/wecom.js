@@ -12,6 +12,7 @@
 import { defineTool, str, int, bool } from './define.js'
 import { sendLocalFile, uploadToDisk, searchDisk, MAX_FILE_BYTES } from '../wecom/outbound.js'
 import { listSkills } from '../memory/skills.js'
+import { isOwner } from '../core/config.js'
 
 /**
  * @param {object} d deps
@@ -149,6 +150,8 @@ export function buildTools(d) {
   // ── 群历史（MCP，只能 7 天）───────────────────────────────
   tools.push(defineTool({
     name: 'wecom_group_history',
+    // 能查任意会话的历史（不只当前会话），走主人 MCP 凭据，群成员拿到就是越权。
+    adminOnly: true,
     description: [
       '拉某个群/某个私聊最近的聊天记录（走企微 MCP 的 msg 服务）。',
       '',
@@ -163,6 +166,12 @@ export function buildTools(d) {
       limit: int('最多返回几条，默认 40，上限 200'),
     },
     execute: async ({ chat_id, minutes, limit }, exec) => {
+      // 第二道闸：查任意会话历史是主人的排障特权，群成员绝不给；
+      // 挂载层的 adminOnly 过滤若被改坏，这里兜底。
+      const caller = chatOfSession?.(exec?.sessionId) || {}
+      if (!isOwner(getConfig(), caller.userId)) {
+        return { ok: false, message: '查其它会话的历史只有主人能用。' }
+      }
       const mc = await mcpFor?.('msg')
       if (!mc) return { ok: false, message: '没配 MCP 的 msg 服务，读不了群历史。让管理员在设置里填。' }
       const chat = chatOfSession?.(exec?.sessionId)
@@ -360,6 +369,8 @@ export function buildTools(d) {
   const WRITE_TOOL_RE = /(^|_)(create|add|update|modify|delete|remove|send|submit|finish|cancel|upload|rename|move|copy)(_|$)/i
   tools.push(defineTool({
     name: 'wecom_mcp',
+    // 以主人身份调企微原生能力（含写文档/发消息/微盘），绝不能给群成员。
+    adminOnly: true,
     description: [
       '企业微信原生能力入口：文档/表格、待办、日程、会议、邮件、通讯录、微盘。',
       '用法：先 action=list 看这个 service 有哪些工具和参数，再 action=call 带上参数调用。',
@@ -380,6 +391,11 @@ export function buildTools(d) {
     required: ['action', 'service'],
     execute: async ({ action, service, tool, args }, exec) => {
       const chat = chatOfSession?.(exec?.sessionId) || {}
+      // 第二道闸：即使将来挂载层的过滤被改动，这里也只认主人。
+      // 群成员若仍能调到本工具，直接拒绝——绝不能借用主人的 MCP 凭据。
+      if (!isOwner(getConfig(), chat.userId)) {
+        return { ok: false, message: '这个能力只有主人能用。' }
+      }
       const mc = await mcpFor?.(service, chat.userId)
       if (!mc) return { ok: false, message: `没配 ${service} 这个 MCP 服务，让管理员在面板里填 URL。` }
       if (action === 'list') {

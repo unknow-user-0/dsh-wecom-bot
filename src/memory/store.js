@@ -42,12 +42,14 @@ function load() {
 }
 
 function save(d) {
-  try {
-    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true })
-    const tmp = FILE + '.tmp'
-    writeFileSync(tmp, JSON.stringify(d, null, 2), 'utf8')
-    renameSync(tmp, FILE)
-  } catch {}
+  // 写盘失败必须上抛：提炼流程靠「add 成功」判断记忆真的落了盘，
+  // 然后才会去删当天的原始流水。这里原来 catch{} 吞掉，等于告诉 consolidate
+  // 「记好了」，结果记忆没写进去、流水却被删 —— 两头空，永久丢数据。
+  // 上抛后 consolidate 的 catch 会保留流水，下一轮重试（add 有去重，不会堆垃圾）。
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true })
+  const tmp = FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(d, null, 2), 'utf8')
+  renameSync(tmp, FILE)
 }
 
 let db = load()

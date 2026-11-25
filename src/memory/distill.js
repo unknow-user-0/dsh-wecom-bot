@@ -115,7 +115,11 @@ function parseJson(text) {
   if (arr) {
     try { return { memories: JSON.parse(arr[0]), skills: [] } } catch {}
   }
-  return { memories: [], skills: [] }
+  // 解析不出合法 JSON（多半是 maxTokens 截断、或模型没按格式输出）绝不能静默当空。
+  // 原来这里返回空 → consolidate 以为「这段没啥可记」，把唯一原料删了 —— 永久丢数据。
+  // 抛错让上层保留流水、下轮重试；模型稳定给空数组 {"memories":[],"skills":[]} 是合法
+  // JSON，早就在上面 return 了，不会走到这，所以正常「没啥可记」不受影响。
+  throw new Error('提炼结果不是合法 JSON（可能被截断），保留流水待重试')
 }
 
 /**
@@ -188,7 +192,10 @@ async function distillChunk({ dsh, target, botName, chatId, kind, chatName, line
       : '') + (knownSkills.size
       ? `已经学会的做法：\n${[...knownSkills.values()].map((s) => `#${s.id} ${s.name}：${s.text}`).join('\n')}\n\n`
       : '') + `对话：\n${transcript}`,
-    maxTokens: 2500,
+    // 一次最多 16 条记忆 + 6 条技能，每条中文可到 40~200 字；2500 对中文偏紧，
+    // 模型稍啰嗦就被截断 → JSON 坏 → 整段白提炼还要重试。放宽到 4000 降低截断率
+    // （model.js 上限 8000，安全）。
+    maxTokens: 4000,
     temperature: 0.2,
   })
   const { memories, skills } = parseJson(out)
@@ -285,6 +292,7 @@ export async function distillLines({ dsh, target, lines, botName = '', log, addS
     byChat.get(l.chatId).push(l)
   }
   let total = { added: 0, updated: 0, outdated: 0, skills: 0, chats: 0 }
+  let firstError = null
   for (const [chatId, list] of byChat) {
     const meta = list.find((l) => l.chatName) || {}
     const kind = list[0].kind || 'dm'
@@ -299,11 +307,15 @@ export async function distillLines({ dsh, target, lines, botName = '', log, addS
         total.outdated += r.outdated
         total.skills += r.skills
       } catch (error) {
-        // 一个会话失败不该让整天的提炼白跑
+        // 模型调用失败（402/网络/格式）绝不能吞：流水是唯一原料、企微不重发，
+        // 吞掉 = consolidate 误判成功 = 删原料 = 永久丢。已经写进去的记忆留着
+        // （store 有去重，下轮重跑不会堆垃圾），但要抛出去让上层保留这一天的原料。
         log?.warn?.(`提炼 ${chatId} 失败：${error.message}`)
+        if (!firstError) firstError = error
       }
     }
     total.chats += 1
   }
+  if (firstError) throw firstError
   return total
 }

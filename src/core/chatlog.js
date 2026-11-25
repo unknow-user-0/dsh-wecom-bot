@@ -79,9 +79,10 @@ export function flush() {
 }
 
 function persist() {
-  const rows = buf
-  buf = []
-  if (!rows.length) return
+  if (!buf.length) return
+  // 快照这一批；写入期间可能有新消息 push 进来。成功后按数量 splice，只移除已写出的那批。
+  // 绝不 buf = [] —— 原来那样写盘一失败，整批唯一原料就凭空消失，永远补不回（企微不重发）。
+  const rows = buf.slice(0, buf.length)
   try {
     ensureDir()
     const f = fileOf(bufDay)
@@ -90,8 +91,10 @@ function persist() {
     const tmp = f + '.tmp'
     writeFileSync(tmp, head + (head && !head.endsWith('\n') ? '\n' : '') + body + '\n', 'utf8')
     renameSync(tmp, f)
+    // 写盘 + rename 都成功了才移除这批；失败时 buf 原样保留，下个 flush 周期重试
+    buf.splice(0, rows.length)
   } catch (error) {
-    // 写不进去也不能影响回消息 —— 流水只是副产品
+    // 写不进去也不能影响回消息 —— buf 留着，30 秒后再试，绝不静默丢原料
   }
 }
 

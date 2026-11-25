@@ -1,11 +1,13 @@
 // 整理器：把「流水 → 提炼 → 记忆/技能」串起来，并管住「什么时候该跑」。
 //
-// 三条硬约束（都是踩过的坑）：
+// 四条硬约束（都是踩过的坑）：
 //   1. 同一天不重复提炼同一段：记 processed[day] = 已处理条数，
 //      下午那次只处理之后新增的（照 aurabot 做法）。
 //   2. 提炼完才删流水。反过来的话，模型一旦失败，原料就没了。
 //   3. 提炼失败不重试到底：失败就打标记，等下一次手动触发，
 //      不要自己陷入「失败-重试-再失败」的循环烧 token。
+//   4. 失败必须上抛到 catch，绝不能在 distill 里吞掉后继续删原料 ——
+//      流水是唯一原料、企微不重发，静默吞错 = 永久丢数据。
 
 import { join } from 'node:path'
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
@@ -84,6 +86,7 @@ export function createConsolidator({ dsh, getConfig, log }) {
     const cfg = getConfig()
     let total = { added: 0, updated: 0, outdated: 0, skills: 0, chats: 0 }
     let days = 0
+    let attempted = false
     try {
       const list = (o.days && o.days.length ? o.days : chatlog.days())
         .filter((d) => d <= today)
@@ -100,6 +103,7 @@ export function createConsolidator({ dsh, getConfig, log }) {
           saveState(state)
           continue
         }
+        attempted = true
         const result = await distillLines({
           dsh,
           target: r.target,
@@ -134,17 +138,27 @@ export function createConsolidator({ dsh, getConfig, log }) {
       state.last = summary
       saveState(state)
       log.info(`整理记忆：${days} 天、${total.chats} 个会话 → ${total.added} 新 / ${total.updated} 合并 / ${total.outdated} 过时 / ${total.skills} 技能`)
-      return { ok: true, ...summary, message: days ? describe(summary) : '没有新的聊天可整理' }
+      return { ok: true, attempted, ...summary, message: days ? describe(summary) : '没有新的聊天可整理' }
     } catch (error) {
       lastError = error.message
       const state2 = loadState()
       state2.last = { at: startedAt, error: error.message, days, ...total }
       saveState(state2)
       log.warn(`整理记忆失败：${error.message}`)
-      return { ok: false, message: error.message }
+      // 原料和 processed 水位都没动（异常发生在 dropDay 之前），下一轮会重试
+      return { ok: false, attempted, message: error.message }
     } finally {
       busy = false
-      chatlog.prune(14)
+      // 只有「这一轮真的成功提炼过」才清理老流水。
+      // 原来 finally 无条件 prune：欠费/模型没配/功能关着时 run 直接 early return，
+      // 但 prune 照跑，把没提炼过的老流水按天数删掉 —— 又一次「没记成却删原料」。
+      // 判断依据是本轮成功写下的 state.last.at === 本次 startedAt。
+      let ok = false
+      try {
+        const s = loadState()
+        ok = !!(s.last && s.last.at === startedAt && !s.last.error)
+      } catch {}
+      if (ok) chatlog.prune(14)
     }
   }
 
@@ -152,7 +166,7 @@ export function createConsolidator({ dsh, getConfig, log }) {
   async function tick() {
     const cfg = getConfig()
     if (!cfg.features.memory || cfg.memory?.autoDistill === false) {
-      chatlog.prune(14)
+      // 功能关着/自动整理关着时绝不 prune：这些流水还没提炼过，删了就永久没了。
       return
     }
     const st = loadState()
@@ -166,7 +180,12 @@ export function createConsolidator({ dsh, getConfig, log }) {
     })
     if (!due.length) return
     const r = await run({ includeToday: true })
-    if (r.ok) {
+    // 只要真调过模型就算「今天这个点跑过了」，成功失败都标记。
+    // 失败也标记是为了防死循环：due 靠「runs[t] !== today」判断，
+    // 失败不标记 → 每分钟重试 → 每分钟烧 token，正好违反硬约束 3。
+    // 原料没删、水位没动，用户手动整理或明天还能重试。
+    // attempted=false 是「没配模型」这种 early return，没烧 token，留着下轮再试。
+    if (r.ok || r.attempted) {
       const st2 = loadState()
       st2.runs = { ...(st2.runs || {}) }
       for (const t of due) st2.runs[t] = today

@@ -7,11 +7,14 @@
 //
 // render 可选：默认只回一行文字；工具要把图片之类的内容块放进结果时自己传。
 
-export function defineTool({ name, description, properties = {}, required = [], execute, render, slow }) {
+export function defineTool({ name, description, properties = {}, required = [], execute, render, slow, adminOnly }) {
   const parameters = { type: 'object', properties, required, additionalProperties: false }
   return {
     name,
     description,
+    // adminOnly：只允许主人私聊档位挂载。用来挡「以主人身份调企微原生能力」
+    // 这类一旦给群成员就会越权的工具。host.toolsFor 在 social 档会过滤掉它们。
+    ...(adminOnly ? { adminOnly: true } : {}),
     // 慢工具（生图、看视频、跑浏览器……）：超过 1.5 秒先往会话发一条「正在做」的提示，
     // 别让人干等一整轮。快工具不用标。
     ...(slow ? { slow } : {}),

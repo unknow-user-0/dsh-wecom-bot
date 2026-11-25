@@ -55,12 +55,12 @@ function load() {
 }
 
 function save(db) {
-  try {
-    if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true })
-    const tmp = FILE + '.tmp'
-    writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8')
-    renameSync(tmp, FILE)
-  } catch {}
+  // 和 store.js 同理：写盘失败必须上抛。提炼靠 addSkill 成功判断技能真的落盘，
+  // 才会去删原始流水。吞错 = 技能没存下、流水却没了 = 永久丢数据。
+  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true })
+  const tmp = FILE + '.tmp'
+  writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf8')
+  renameSync(tmp, FILE)
 }
 
 /** 和记忆同一套极简分词：中文 2-gram + 英文词 */

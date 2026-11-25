@@ -207,20 +207,23 @@ ok('旧口径被就地改掉，而不是多出一条矛盾的', skills.listSkill
 ok('内容确实换成了新口径', skills.listSkills('报表')[0].text.includes('B 表'), JSON.stringify(skills.listSkills('报表')[0]))
 ok('提炼时把已有技能清单给了模型', String(llm3.seen[0].messages[0].content[0].text).includes('报表用 A 表汇总'))
 
-console.log('\n⑧ 提炼出错不炸、不落半截数据')
+console.log('\n⑧ 提炼出错必须上抛（吞掉会让 consolidate 误判成功、删掉唯一原料）')
 const boom = {
   listProviders: () => [], listModels: async () => [], resolveModelInfo: async () => null,
   stream() { return (async function* () { yield { type: 'finish', index: 0, reason: { kind: 'error', failure: { code: 'X', message: '模型挂了' } } } })() },
 }
-const r3 = await distillLines({
-  dsh: { llm: boom, get: (n) => (n === 'llm' ? boom : null) },
-  target: { provider: 'p', model: 'm1' },
-  lines,
-  botName: '海棠',
-  log: { debug() {}, info() {}, warn() {} },
-  addSkill: () => {},
-})
-ok('模型报错时返回零而不是抛出去', r3.added === 0 && r3.skills === 0, JSON.stringify(r3))
+let threw8 = null
+try {
+  await distillLines({
+    dsh: { llm: boom, get: (n) => (n === 'llm' ? boom : null) },
+    target: { provider: 'p', model: 'm1' },
+    lines,
+    botName: '海棠',
+    log: { debug() {}, info() {}, warn() {} },
+    addSkill: () => {},
+  })
+} catch (e) { threw8 = e }
+ok('模型报错时上抛（不再静默吞掉）', threw8 && /模型挂了/.test(threw8.message), threw8 ? threw8.message : '没抛')
 
 console.log(`\n${fail ? '❌' : '✅'} ${pass} 项通过${fail ? `，${fail} 项失败` : ''}\n`)
 process.exit(fail ? 1 : 0)
