@@ -23,6 +23,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { uploadMedia, isImagePath, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { helpUrl } from '../wecom/mcp.js'
 import { asLog, fireAndForget, messageOf } from '../core/safe.js'
 
 const DEFAULT_TEXT = 'emmm...'
@@ -47,12 +48,23 @@ const COOLDOWN_REMOTE_MS = 30 * 1000       // 瞬时错误：等下一次就重�
  * 反过来的代价只是多花几毫秒读一次图。
  */
 export function isRemoteFailure(error) {
+  // 但「授权过期」是个例外：它不是抖动，人不去点授权，重试一万次都一样。
+  // 以前把它算瞬时故障，结果每 30 秒白打一次接口、日志刷一行 warn，
+  // 而用户那边只会觉得「这插件坏了」。授权类单独归为 needAuth。
+  if (isAuthFailure(error)) return false
   const text = messageOf(error)
   const code = Number(error?.code ?? error?.errcode ?? NaN)
-  // 企微侧错误码：850003 授权过期、40001/42001 token 失效、45009 限流、
+  // 企微侧错误码：40001/42001 token 失效、45009 限流、
   // 60020 IP 不在白名单、-1 系统繁忙
-  if ([850003, 40001, 42001, 45009, 60020, -1].includes(code)) return true
-  return /authorization expired|授权|过期|限流|rate limit|too many|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network|socket|socket hang up/i.test(text)
+  if ([40001, 42001, 45009, 60020, -1].includes(code)) return true
+  return /限流|rate limit|too many|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|fetch failed|network|socket|socket hang up/i.test(text)
+}
+
+/** 授权过期：必须人去点一下授权，重试无用 */
+export function isAuthFailure(error) {
+  const code = Number(error?.code ?? error?.errcode ?? NaN)
+  if (code === 850003) return true
+  return /authorization expired|not authorized|未授权|权限已过期/i.test(messageOf(error))
 }
 
 export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, cooldowns }) {
@@ -65,6 +77,8 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
   let cached = null // { key, mediaId, at }
   let failUntil = 0
   let failReason = ''
+  /** 授权过期时企微给的授权入口（面板要渲染成可点按钮，光一行红字没人知道去哪点） */
+  let authHint = ''
 
   function cfgOf() {
     const c = getConfig() || {}
@@ -130,16 +144,30 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
         })
       }
       failReason = ''
+      authHint = ''
     } catch (error) {
-      failReason = messageOf(error)
+      const auth = isAuthFailure(error)
       const remote = isRemoteFailure(error)
-      const cooldown = remote ? coolRemote : coolLocal
+      // 授权过期也用短冷却：这个文件的注释里就记着实测案例 ——
+      // 用户点完授权当场就好了，但我们在静默 10 分钟，他以为插件坏了。
+      const cooldown = remote || auth ? coolRemote : coolLocal
       failUntil = Date.now() + cooldown
-      // 瞬时故障多发一次 warn 带秒数，用户看日志就知道「等下会重试」；
-      // 图本身的问题才是真需要人去处理，所以也说清换图就能好。
-      log('warn', `占位图没发出去：${failReason}`
-        + `（${remote ? '外部一时不通' : '这张图本身发不了'}，${Math.round(cooldown / 1000)} 秒内不再重试）`
-        + (remote ? '' : ' 换一张图就能恢复。'))
+      if (auth) {
+        const url = helpUrl(error)
+        authHint = url
+        failReason = '企微说这个机器人的「消息」权限过期了（850003），去企业微信重新授权一下'
+        log('warn', `${failReason}`
+          + (url ? `\n授权入口：${url}` : '')
+          + '\n授权前发不了图。')
+      } else {
+        authHint = ''
+        failReason = messageOf(error)
+        // 瞬时故障多发一次 warn 带秒数，用户看日志就知道「等下会重试」；
+        // 图本身的问题才是真需要人去处理，所以也说清换图就能好。
+        log('warn', `占位图没发出去：${failReason}`
+          + `（${remote ? '外部一时不通' : '这张图本身发不了'}，${Math.round(cooldown / 1000)} 秒内不再重试）`
+          + (remote ? '' : ' 换一张图就能恢复。'))
+      }
     }
   }
 
@@ -174,5 +202,7 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
     fire,
     /** 面板自检用：现在能不能发图（不能就说明原因） */
     get lastImageError() { return failReason },
+    /** 上次发图失败的授权入口（没有就是空串） */
+    get lastImageAuthUrl() { return authHint },
   }
 }

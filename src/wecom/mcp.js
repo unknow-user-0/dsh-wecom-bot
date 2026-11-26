@@ -12,17 +12,45 @@
 //   - 只能查最近 7 天，早于 7 天报 850016
 
 const PROTOCOL = '2024-11-05'
-const CLIENT_INFO = { name: 'dsh-wecom-bot', version: '0.1.3' }
+const CLIENT_INFO = { name: 'dsh-wecom-bot', version: '0.1.4' }
 
 /** 必须剥离的字段 */
 const STRIP_KEYS = new Set(['security_notice', 'extra_identity_context'])
 
 export class McpError extends Error {
-  constructor(message, code) {
+  /**
+   * @param {string} message 给人看的错误说明
+   * @param {number|string} [code] 企微 errcode / error.code
+   * @param {object} [extra]
+   * @param {string} [extra.help] 企微返回的 help_message（原样，里面带授权链接）
+   * @param {string} [extra.helpInstruction] 企微要求怎么使用 help_message
+   */
+  constructor(message, code, extra = {}) {
     super(message)
     this.name = 'McpError'
     this.code = code
+    // 企微明确要求把 help_message 逐字原样展示给用户（里面是授权入口）。
+    // 以前这里只留 errmsg，用户看到「授权过期」却不知道去哪点授权。
+    this.help = String(extra.help || '')
+    this.helpInstruction = String(extra.helpInstruction || '')
   }
+
+  /** 这个错是「去点一下授权就好了」，不是网络抖动，重试一万次也没用 */
+  get needAuth() {
+    return this.code === 850003 || /authorization expired|not authorized|未授权|权限已过期/i.test(this.message)
+  }
+}
+
+/**
+ * 企微在 help_message 里给的入口是 markdown 链接 [文字](url) 或裸 URL。
+ * 从里面抠出第一个 http(s) 地址，给面板渲染成可点按钮用。
+ */
+export function helpUrl(error) {
+  const text = String(error?.help || '')
+  const md = /\((https?:\/\/[^)\s]+)\)/.exec(text)
+  if (md) return md[1]
+  const bare = /(https?:\/\/[^\s)」]+)/.exec(text)
+  return bare ? bare[1] : ''
 }
 
 /** 递归剥掉不该给终端用户看的字段 */
@@ -50,6 +78,68 @@ export function localTime(ms = Date.now()) {
 /** 安全的时间窗：begin 至少留 6 天余量（7 天边界会踩 850016） */
 export function safeWindow(spanMs = 6 * 86400e3, now = Date.now()) {
   return { begin: localTime(now - spanMs), end: localTime(now + 3600e3) }
+}
+
+/**
+ * 各服务的「探活工具」：只读、幂等、不产生任何副作用。
+ *
+ * 为什么不能只调 tools/list 就算测通：实测 850003（授权过期）下
+ * initialize 和 tools/list 永远成功，只有 tools/call 才暴露 —— 面板
+ * 那句「通了，6 个工具」就是这么骗过人的。
+ * 也不能用 media_upload 当探针：它不校验服务权限，授权全过期了它照样返回
+ * errcode=0，只能证明 apikey 是对的，证明不了授权还有效。
+ */
+export const MCP_PROBES = {
+  msg: { tool: 'message_aibot_sessions_list', args: {} },
+  mail: { tool: 'mail_search', args: { limit: 1 } },
+  doc: { tool: 'doc_search', args: { keywords: '会议', limit: 1 } },
+  todo: { tool: 'todo_list', args: { limit: 1 } },
+  schedule: { tool: 'calendar_schedules_list', args: {} },
+  meeting: { tool: 'meeting_list', args: { limit: 1 } },
+  disk: { tool: 'disk_files_list', args: { limit: 1 } },
+  contact: { tool: 'contact_users_search', args: { keywords: 'a' } },
+}
+
+/**
+ * 真探活：列工具 + 调一次业务工具。
+ * 判据只有一条 —— 「授权还有效吗」，所以：
+ *   · needAuth / 网络不通  → 失败（这是面板该红的地方）
+ *   · 其它业务/参数错误     → 算通（能走到业务层就说明授权过了，报错是参数的事）
+ */
+export async function probeService(mc, service) {
+  const probe = MCP_PROBES[service]
+  let names = []
+  try {
+    names = (await mc.listTools()).map((t) => t.name)
+  } catch (error) {
+    return failOf(error, names, probe)
+  }
+  if (!probe) return { ok: true, count: names.length, names, note: '没有探活工具，只验了连通性' }
+  try {
+    await mc.call(probe.tool, probe.args)
+    return { ok: true, count: names.length, names, tool: probe.tool }
+  } catch (error) {
+    return failOf(error, names, probe)
+  }
+}
+
+function failOf(error, names, probe) {
+  const base = { count: names.length, names, tool: probe?.tool }
+  if (error?.needAuth) {
+    return {
+      ...base,
+      ok: false,
+      needAuth: true,
+      message: error.message,
+      help: error.help || '',
+      url: helpUrl(error),
+    }
+  }
+  if (error?.code === 'network' || String(error?.code || '').startsWith('http_')) {
+    return { ...base, ok: false, message: error.message }
+  }
+  // 能拿到业务层的报错，说明授权这关是过的。
+  return { ...base, ok: true, note: `接口回了「${error?.message || '未知错误'}」，这是参数/业务问题，不是授权问题` }
 }
 
 /** 解析响应体：普通 JSON 或 SSE */
@@ -91,15 +181,22 @@ function unwrap(response) {
         // B 这种 errcode 是 0、成功与否全靠 error.code，只看 errcode 就会把
         // 「上传失败」当成功返回，上层拿到 undefined 再去用，错误被推迟到很远的地方。
         // 实测 disk_files_upload 空参就返回 B 这种。
+        // help_message / help_instruction 是企微专门写给终端用户的（多半是
+        // 「去这里授权」的链接），而且明确要求逐字原样展示。它跟
+        // security_notice 恰好相反：那个必须剥，这个必须留。
+        const help = {
+          help: stripped.help_message,
+          helpInstruction: stripped.help_instruction,
+        }
         const inner = stripped.error
         if (inner && typeof inner === 'object') {
           const code = Number(inner.code ?? 0)
           if (code !== 0) {
-            throw new McpError(String(inner.message || `error.code ${code}`), code)
+            throw new McpError(String(inner.message || `error.code ${code}`), code, help)
           }
         }
         if (Number(stripped.errcode ?? 0) !== 0) {
-          throw new McpError(String(stripped.errmsg || `errcode ${stripped.errcode}`), Number(stripped.errcode))
+          throw new McpError(String(stripped.errmsg || `errcode ${stripped.errcode}`), Number(stripped.errcode), help)
         }
       }
       return stripped

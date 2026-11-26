@@ -25,7 +25,7 @@ import * as skills from './memory/skills.js'
 import { createVault, mcpRef, REF } from './core/vault.js'
 import { checkQuota, addUsage, tickMinute, usageSnapshot, resetUsage, estimateTokens } from './core/quota.js'
 import { createWecomClient, WecomApiError, WecomUncertainError } from './wecom/client.js'
-import { createMcpClient, MCP_SERVICES, validateMcpUrl } from './wecom/mcp.js'
+import { createMcpClient, MCP_SERVICES, validateMcpUrl, probeService } from './wecom/mcp.js'
 import { createHub, WORKSPACE_TITLE } from './chat/hub.js'
 import { checkAccess, autoRegister, deniedReply } from './chat/access.js'
 import { createMerger } from './chat/merge.js'
@@ -132,16 +132,41 @@ export function apply(ctx) {
   const mcpPool = new Map() // ref → client
 
   function adminList() { return cfg.admins || [] }
-  function serviceUrlOf(service, userid) {
-    const pick = (a) => (a && a.mcp && a.mcp[service]) || ''
+  /**
+   * 找某个服务的 MCP 地址。两段：
+   *   1) config.json 里的明文（快路径，最常见）
+   *   2) 凭据库里的 WECOM_BOT_MCP_<SERVICE>_<HASH>（慢路径）
+   *
+   * 为什么必须有第 2 段：地址的**真身一直在凭据库**，config 里那份只是副本。
+   * 老实现只认副本，副本一丢（换机迁移、手改 config、旧版本写坏）就报「还没配这个服务」，
+   * 哪怕凭据库里的 URL 好好的 —— 这正是「测一下说通了、干活说没配」的根。
+   */
+  async function serviceUrlOf(service, userid) {
+    // 用 hasOwnProperty：a.mcp['constructor'] 会顺着原型链拿到函数，
+    // 而 service 名来自工具参数（任意字符串），不是白名单成员。
+    const pick = (a) => (a && a.mcp && Object.prototype.hasOwnProperty.call(a.mcp, service) && a.mcp[service]) || ''
     if (userid) {
       const a = adminList().find((x) => x.userid === userid)
-      if (a && pick(a)) return { url: pick(a), userid }
+      if (a && pick(a)) return { url: pick(a), userid, fromVault: false }
     }
     // 没指定人：先用 owner 的，再退第一个配了的
     const owner = adminList().find((a) => a.role === 'owner')
-    if (owner && pick(owner)) return { url: pick(owner), userid: owner.userid }
-    for (const a of adminList()) if (pick(a)) return { url: pick(a), userid: a.userid }
+    if (owner && pick(owner)) return { url: pick(owner), userid: owner.userid, fromVault: false }
+    for (const a of adminList()) if (pick(a)) return { url: pick(a), userid: a.userid, fromVault: false }
+    // 慢路径：谁先问谁优先，其次 owner，最后挨个试
+    const order = []
+    if (userid) order.push(userid)
+    if (owner && !order.includes(owner.userid)) order.push(owner.userid)
+    for (const a of adminList()) if (!order.includes(a.userid)) order.push(a.userid)
+    for (const uid of order) {
+      try {
+        const url = await secrets.resolve(mcpRef(service, uid))
+        if (url) {
+          log?.info?.(`${service} 的地址在凭据库里（${uid}），配置里没有，按凭据库走`)
+          return { url, userid: uid, fromVault: true }
+        }
+      } catch {}
+    }
     return null
   }
 
@@ -151,12 +176,13 @@ export function apply(ctx) {
     // mcpRef 内部虽然 String() 了，但 serviceUrlOf 的严格 find 会漏，
     // 统一成字符串再查，ref 才算得一致。
     const uid = userid == null ? undefined : String(userid)
-    const found = serviceUrlOf(service, uid)
+    const found = await serviceUrlOf(service, uid)
     if (!found) return null
     const ref = mcpRef(service, found.userid)
     const cached = mcpPool.get(ref)
     if (cached) return cached
-    let url = await secrets.resolve(ref)
+    // fromVault 时 found.url 就是从凭据库读出来的，不必再查一遍
+    let url = found.fromVault ? found.url : await secrets.resolve(ref)
     if (!url) {
       // 凭据库没读到（新机冷启动 / 凭据只写进了 config 明文 / 服务晚就绪）：
       // config 里的 URL 同样经过面板校验，拿来兜底，总比直接「没配」强。
@@ -426,7 +452,12 @@ export function apply(ctx) {
 
   // 发图要 media_id，media_id 只能从 disk / mail / doc 的 media_upload 换。
   // 面板上要把这个说清楚：选了图但没配这三个服务之一，图是发不出去的。
-  const mcpUploadReady = () => ['disk', 'mail', 'doc'].some((s) => Boolean(serviceUrlOf(s)))
+  const mcpUploadReady = async () => {
+    for (const s of ['disk', 'mail', 'doc']) {
+      if (await serviceUrlOf(s)) return true
+    }
+    return false
+  }
 
   // ---------- 记忆整理（流水 → 提炼 → 记忆/技能）----------
   const consolidator = createConsolidator({
@@ -1160,41 +1191,50 @@ export function apply(ctx) {
     if (!adminList().some((a) => a.userid === uid)) return { ok: false, message: '没这个管理员' }
     if (!MCP_SERVICES.some((s) => s.id === service)) return { ok: false, message: '没这个服务' }
     const ref = mcpRef(service, uid)
-    // 凭据服务是 async 的：必须 await 且接住错误。原来没 await，svc.set 一 reject
-    // 就变成 unhandledRejection —— Node 默认直接杀掉整个进程，连累 DSH 里所有别的会话。
-    // 现在失败只让这一个面板操作返回 ok:false。
-    try {
-      if (!url) {
+    const warn = []
+    // 凭据库和配置文件是两条独立的存储，谁坏都不该拖垮另一条。
+    // 老实现把 secrets.set 的异常抛到最外层，结果凭据服务一挂，
+    // setAdminMcp 就不执行 —— 连 config.json 都存不上，用户永远配不好。
+    // 现在：凭据库失败只降级成 warning，配置照样落盘（serviceUrlOf 会读 config）。
+    if (!url) {
+      try {
         await secrets.unset(ref)
-        mcpPool.delete(ref)
-        return { ok: true, config: publicConfig(setConfig(setAdminMcp(uid, service, ''))) }
+      } catch (error) {
+        warn.push(`凭据库里的旧地址没删掉（${error.message}），它可能还会被继续使用`)
       }
-      const v = validateMcpUrl(url, service)
-      if (!v.ok) return { ok: false, message: v.message }
-      await secrets.set(ref, url)
       mcpPool.delete(ref)
-      // 写后回读：确认这次填写真的能被读回来（口径/类型错误在这里就暴露）。
-      const saved = await secrets.resolve(ref)
       return {
         ok: true,
-        config: publicConfig(setConfig(setAdminMcp(uid, service, url))),
-        ...(saved === url ? {} : { warning: '凭据已写但回读不一致，请检查凭据服务' }),
-        ...(secrets.kind() === 'memory' ? { warning: '凭据只存内存，重启 DSH 后会丢——请等凭据服务就绪后重填' } : {}),
+        config: publicConfig(setConfig(setAdminMcp(uid, service, ''))),
+        ...(warn.length ? { warning: warn.join('；') } : {}),
       }
+    }
+    const v = validateMcpUrl(url, service)
+    if (!v.ok) return { ok: false, message: v.message }
+    try {
+      await secrets.set(ref, url)
     } catch (error) {
-      return { ok: false, message: `存凭据失败：${error.message}` }
+      warn.push(`凭据库里没存上（${error.message}），先按配置文件里的地址用，重启 DSH 后可能要重填`)
+    }
+    mcpPool.delete(ref)
+    // 写后回读：确认这次填写真的能被读回来（口径/类型错误在这里就暴露）。
+    let saved = ''
+    try { saved = await secrets.resolve(ref) } catch {}
+    if (saved !== url && !warn.length) warn.push('凭据已写但回读不一致，请检查凭据服务')
+    if (secrets.kind() === 'memory') warn.push('凭据只存内存，重启 DSH 后会丢——请等凭据服务就绪后重填')
+    return {
+      ok: true,
+      config: publicConfig(setConfig(setAdminMcp(uid, service, url))),
+      ...(warn.length ? { warning: warn.join('；') } : {}),
     }
   })
   route('/mcp/test', async (req) => {
     const body = await readBody(req)
     const mc = await mcpFor(body.service, body.userid)
     if (!mc) return { ok: false, message: '还没配这个服务' }
-    try {
-      const list = await mc.listTools()
-      return { ok: true, count: list.length, names: list.map((t) => t.name).slice(0, 40) }
-    } catch (error) {
-      return { ok: false, message: error.message }
-    }
+    // 只列 tools/list 会假通过：授权过期（850003）时 initialize 和 tools/list
+    // 永远 200，只有真调一次业务工具才暴露。面板曾因此显示「通了，6 个工具」。
+    return probeService(mc, body.service)
   })
   route('/sessions', () => ({ ok: true, rows: Object.entries(hub.sessionMap()).map(([k, v]) => ({ key: k, ...v })) }))
 
@@ -1346,7 +1386,8 @@ export function apply(ctx) {
       bytes,
       preview,
       lastImageError: placeholder.lastImageError,
-      hasUpload: Boolean(mcpUploadReady()),
+      lastImageAuthUrl: placeholder.lastImageAuthUrl,
+      hasUpload: Boolean(await mcpUploadReady()),
     }
   })
   route('/placeholder/clear', async () => {

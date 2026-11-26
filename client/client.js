@@ -205,6 +205,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
   background:rgba(24,28,33,.94);color:#fff;font-size:13px;box-shadow:0 8px 28px rgba(0,0,0,.24);max-width:70vw}
 .wb-toast.err{background:rgba(207,34,46,.96)}
 .wb-toast.ok{background:rgba(10,122,61,.96)}
+.wb-toast.warn{background:rgba(158,96,12,.96)}
 .wb-seg{display:inline-flex;padding:2px;border-radius:10px;background:var(--wb-card-2);border:1px solid var(--wb-line);gap:2px}
 .wb-seg button{height:28px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:var(--wb-sub);font:inherit;font-size:12.5px;cursor:pointer}
 .wb-seg button.on{background:var(--wb-card);color:var(--wb-text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
@@ -289,10 +290,11 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [wizard, setWizard] = useState(false)
       const toastTimer = useRef(0)
 
-      const toast = useCallback((text, kind) => {
-        setToastMsg({ text, kind })
+      const toast = useCallback((text, kind, link) => {
+        setToastMsg({ text, kind, link: link || '' })
         clearTimeout(toastTimer.current)
-        toastTimer.current = setTimeout(() => setToastMsg(null), 2600)
+        // 带链接的多留一会儿，不然刚看清就没得点了
+        toastTimer.current = setTimeout(() => setToastMsg(null), link ? 12000 : 2600)
       }, [])
 
       const [edits, setEdits] = useState({})
@@ -436,7 +438,16 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h(Btn, { kind: 'ghost', onClick: undo }, '撤销'),
             h(Btn, { kind: 'primary', onClick: () => void save() }, '保存设置')) : null,
           wizard ? h(Wizard, { ...P, onClose: () => setWizard(false) }) : null),
-        toastMsg ? h('div', { className: cx('wb-toast', toastMsg.kind), role: 'status' }, toastMsg.text) : null,
+        toastMsg
+          ? h('div', { className: cx('wb-toast', toastMsg.kind), role: 'status' },
+            toastMsg.text,
+            toastMsg.link
+              ? h('a', {
+                href: toastMsg.link, target: '_blank', rel: 'noreferrer noopener',
+                style: { display: 'inline-block', marginLeft: 10, fontWeight: 600, color: 'inherit', textDecoration: 'underline' },
+              }, '去企微授权')
+              : null)
+          : null,
       )
     }
 
@@ -579,14 +590,28 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       }
       const setOne = async (id, service, url) => {
         const r = await post('/admin/mcp', { userid: id, service, url })
-        if (r?.ok) { toast(url ? '已存' : '已清空', 'ok'); void reload() }
-        else toast(r?.message || '没存上', 'err')
+        if (!r?.ok) { toast(r?.message || '没存上', 'err'); return }
+        // 后端会把「凭据只进了内存」「凭据库没删掉旧值」这类情况放在 warning 里。
+        // 丢掉它 = 用户看到「已存」，重启后静默失效 —— 最难查的那种故障。
+        if (r.warning) toast(r.warning, 'warn')
+        else toast(url ? '已存' : '已清空', 'ok')
+        void reload()
       }
       const test = async (id, service) => {
         setTesting(true)
         const r = await post('/mcp/test', { userid: id, service })
         setTesting(false)
-        toast(r?.ok ? `通了，${r.count} 个工具：${(r.names || []).slice(0, 4).join('、')}…` : r?.message || '连不上', r?.ok ? 'ok' : 'err')
+        if (r?.ok) {
+          toast(r.note ? `通的（${r.note}）` : `通了，${r.count} 个工具：${(r.names || []).slice(0, 4).join('、')}…`, 'ok')
+          return
+        }
+        // 授权过期时企微会在 help_message 里给授权入口，必须让人点得到 ——
+        // 只显示一行「authorization expired」，用户根本不知道该去哪改。
+        if (r?.needAuth) {
+          toast('企微说这个机器人的权限过期了，点右边去授权', 'err', r.url)
+          return
+        }
+        toast(r?.message || '连不上', 'err')
       }
       return h('div', { className: 'wb-sect' },
         h(Card, { title: '加管理员', hint: 'userid 让本人给机器人发一条私信就能看到（机器人会回他的 ID）。第一个是主人档，会有电脑权限。' },
@@ -609,17 +634,24 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               h('div', { className: 'wb-row', style: { marginBottom: 8 } },
                 h('div', { className: 'wb-seg' }, (services || []).map((s) => h('button', {
                   key: s.id, type: 'button', className: cx(mcpTab === s.id && 'on'),
-                  onClick: () => { setMcpTab(s.id); setMcpUrl(a.mcp?.[s.id] || '') },
+                  // publicConfig 下发的是「配过没配过」的布尔，不是 URL —— 绝不能当值塞进输入框，
+                  // 否则框里显示 "true"，点「存」还会因为 mcpUrl.trim() 崩掉。
+                  onClick: () => { setMcpTab(s.id); setMcpUrl('') },
                 }, s.name)))),
               h(Field, {
                 label: (services || []).find((s) => s.id === mcpTab)?.name || mcpTab,
                 tip: (services || []).find((s) => s.id === mcpTab)?.hint || '',
               }, h('input', {
-                className: 'wb-input wb-mono', value: mcpUrl, placeholder: 'https://qyapi.weixin.qq.com/mcp/v2/bot/…?apikey=…',
+                className: 'wb-input wb-mono', value: mcpUrl,
+                placeholder: a.mcp?.[mcpTab]
+                  ? '已配过。要换地址就粘贴新的覆盖，留空点「存」不生效'
+                  : 'https://qyapi.weixin.qq.com/mcp/v2/bot/…?apikey=…',
                 onChange: (e) => setMcpUrl(e.target.value),
               })),
               h('div', { className: 'wb-row', style: { marginTop: 8 } },
-                h(Btn, { sm: true, kind: 'primary', onClick: () => void setOne(a.userid, mcpTab, mcpUrl.trim()) }, '存'),
+                // 空值在后端 = 清空。所以「存」必须挡住空输入，
+                // 否则想改地址时手一抖点了存，配好的服务直接被抹掉。
+                h(Btn, { sm: true, kind: 'primary', disabled: !String(mcpUrl || '').trim(), onClick: () => void setOne(a.userid, mcpTab, String(mcpUrl || '').trim()) }, '存'),
                 h(Btn, { sm: true, onClick: () => void test(a.userid, mcpTab), disabled: testing }, testing ? '测…' : '测一下'),
                 h(Btn, { sm: true, kind: 'ghost', onClick: () => { setMcpUrl(''); void setOne(a.userid, mcpTab, '') } }, '清空'),
                 a.mcp?.[mcpTab] ? h('span', { className: 'wb-tag ok' }, '已配') : h('span', { className: 'wb-tag' }, '没配'))) : null)))
@@ -1026,7 +1058,13 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 
         st?.lastImageError
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6, color: 'var(--dsw-alias-warning, #b7791f)' } },
-            '上次发图失败：' + st.lastImageError)
+            '上次发图失败：' + st.lastImageError,
+            st.lastImageAuthUrl
+              ? h('a', {
+                href: st.lastImageAuthUrl, target: '_blank', rel: 'noreferrer noopener',
+                style: { marginLeft: 8, color: 'inherit', textDecoration: 'underline', fontWeight: 600 },
+              }, '去企微授权')
+              : null)
           : null)
     }
 

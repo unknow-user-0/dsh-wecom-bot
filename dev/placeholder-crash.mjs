@@ -232,10 +232,9 @@ function failingMcp(reason = 'media_upload 失败：不支持该图片格式') {
 //       图本身有问题 → 长冷却（反正换图才能好）。
 // ---------------------------------------------------------------
 {
-  const { isRemoteFailure } = await import('../src/chat/placeholder.js')
+  const { isRemoteFailure, isAuthFailure } = await import('../src/chat/placeholder.js')
 
   const remoteCases = [
-    [{ code: 850003, message: 'authorization expired' }, '850003 授权过期'],
     [{ code: 45009 }, '45009 限流'],
     [{ code: -1 }, '-1 系统繁忙'],
     [new Error('fetch failed'), 'fetch failed'],
@@ -246,6 +245,18 @@ function failingMcp(reason = 'media_upload 失败：不支持该图片格式') {
     check(isRemoteFailure(err) === true, `外部故障判为瞬时：${name}`)
   }
 
+  // 授权过期【不算】瞬时故障：人不去点授权，重试一万次都一样。
+  // 以前把它算成瞬时，结果每 30 秒白打一次接口、日志刷一行 warn。
+  const authCases = [
+    [{ code: 850003, message: 'authorization expired' }, '850003 授权过期'],
+    [{ code: 850003 }, '850003 只有码没有文案'],
+    [new Error('errcode 850003: authorization expired, hint: [...]'), '文案带 authorization expired'],
+  ]
+  for (const [err, name] of authCases) {
+    check(isRemoteFailure(err) === false, `授权过期不算瞬时：${name}`)
+    check(isAuthFailure(err) === true, `授权过期认得出：${name}`)
+  }
+
   const localCases = [
     [new Error('media_upload 失败：不支持该图片格式'), '图片格式不支持'],
     [{ code: 40058, message: 'file upload source is invalid' }, '参数错误'],
@@ -253,6 +264,7 @@ function failingMcp(reason = 'media_upload 失败：不支持该图片格式') {
   ]
   for (const [err, name] of localCases) {
     check(isRemoteFailure(err) === false, `自身问题判为确定性：${name}`)
+    check(isAuthFailure(err) === false, `自身问题不是授权问题：${name}`)
   }
 }
 

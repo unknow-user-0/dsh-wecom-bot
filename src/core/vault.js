@@ -25,10 +25,16 @@ export function mcpRef(service, userid) {
   return `WECOM_BOT_MCP_${String(service).toUpperCase()}_${h}`
 }
 
-/** 内存兜底（宿主没有凭据服务时用；只活在进程内，不落盘） */
-const memory = new Map()
-
 export function createVault(ctx, log) {
+  /**
+   * 内存兜底（宿主没有凭据服务时用；只活在进程内，不落盘）。
+   *
+   * 必须放在实例里，不能提到模块级：模块级是整个进程一份，插件热重载时
+   * 会再创建一次 vault，上一轮的镜像还留着 —— 于是「清空」了还在、
+   * 「没配」了还能连上。测试里 sim 一次重启就能看出来。
+   */
+  const memory = new Map()
+
   // 凭据服务可能比本插件晚就绪（新机冷启动尤其明显）。
   // 旧写法 `const svc = ctx.get?.(...) || ctx.credentials` 在 apply 那一刻就把
   // undefined 固化进闭包：之后所有 set 只写内存镜像、不落宿主凭据库，重启即丢，
@@ -75,7 +81,10 @@ export function createVault(ctx, log) {
     memory.delete(ref)
     const svc = getSvc()
     if (svc && typeof svc.unset === 'function') {
-      try { await svc.unset(ref) } catch {}
+      // 不能吞：吞掉之后「清空」会显示成功，宿主里那条还在，
+      // 而 serviceUrlOf 现在会回落到凭据库 —— 旧地址会诈尸。
+      // 抛出去，让调用方把它当 warning 说给用户听。
+      await svc.unset(ref)
     }
     return true
   }
