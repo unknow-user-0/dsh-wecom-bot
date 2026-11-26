@@ -12,7 +12,7 @@
 //   - 只能查最近 7 天，早于 7 天报 850016
 
 const PROTOCOL = '2024-11-05'
-const CLIENT_INFO = { name: 'dsh-wecom-bot', version: '0.1.2' }
+const CLIENT_INFO = { name: 'dsh-wecom-bot', version: '0.1.3' }
 
 /** 必须剥离的字段 */
 const STRIP_KEYS = new Set(['security_notice', 'extra_identity_context'])

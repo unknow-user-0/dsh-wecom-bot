@@ -79,6 +79,54 @@ async function getJson(url, ms = 5000) {
   return r.json()
 }
 
+// 开新标签页，**不抢前台**。
+//
+// 优先用 Target.createTarget({background:true})：它明确要求浏览器在后台开页，
+// 主人正在看的窗口不会被切走。退路是 HTTP 端点 /json/new —— 那个会把标签页
+// 拉到前台（新标签页默认被激活），等于用一次人机交互换取一次后台读取，很烦人。
+// 注意 /json/new 只认 PUT（GET 会 405），地址也要整段转义，否则带 ?a=b 的网址
+// 会把参数吞进 /json/new 自己的查询串里。
+async function newTabAt(port, url, ms = 15000) {
+  const bg = await bgTabAt(port, url, ms).catch(() => null)
+  if (bg) return bg
+  const r = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
+    method: 'PUT',
+    signal: AbortSignal.timeout(ms),
+  })
+  if (!r.ok) throw new Error(`开新标签页失败：HTTP ${r.status}`)
+  return r.json()
+}
+
+/** 经浏览器级 CDP 在后台开标签页，拿回和 /json/new 同形状的对象。 */
+async function bgTabAt(port, url, ms = 15000) {
+  const ver = await getJson(`http://127.0.0.1:${port}/json/version`, 3000)
+  const ws = ver?.webSocketDebuggerUrl
+  if (!ws) return null
+  const c = connectCdp(ws)
+  let targetId = ''
+  try {
+    await c.ready
+    const made = await c.send('Target.createTarget', { url, background: true }, ms)
+    targetId = made?.targetId || ''
+  } finally {
+    try { c.close() } catch {}
+  }
+  if (!targetId) return null
+  // 目标刚建好时可能还没出现在列表里，给它一点时间
+  for (let i = 0; i < 20; i += 1) {
+    const list = await getJson(`http://127.0.0.1:${port}/json/list`, 3000)
+    const hit = list.find((t) => t.id === targetId)
+    if (hit?.webSocketDebuggerUrl) return hit
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return null
+}
+
+async function closeTabAt(port, id) {
+  if (!id) return
+  await fetch(`http://127.0.0.1:${port}/json/close/${id}`, { signal: AbortSignal.timeout(5000) }).catch(() => {})
+}
+
 /** 一条 CDP 连接：send 发命令，on 收事件。 */
 export function connectCdp(wsUrl, { WS = globalThis.WebSocket } = {}) {
   if (!WS) throw new Error('当前 Node 没有 WebSocket（要 Node 22 以上）')
@@ -143,6 +191,56 @@ export function connectCdp(wsUrl, { WS = globalThis.WebSocket } = {}) {
   }
 }
 
+/** 在某条 CDP 连接里跑一段表达式，返回值（可以是 Promise）。 */
+async function evalOn(c, expression, ms = 30000) {
+  const r = await c.send('Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  }, ms)
+  if (r.exceptionDetails) {
+    throw new Error(
+      r.exceptionDetails.exception?.description?.split('\\n')[0]
+      || r.exceptionDetails.text
+      || '页面脚本出错',
+    )
+  }
+  return r.result?.value
+}
+
+/** 等页面自己加载完（新开的标签页用；document.readyState 到位就返回）。 */
+async function waitReady(c, ms = 30000, want = '') {
+  const end = Date.now() + ms
+  const target = String(want || '').replace(/^www\./, '')
+  while (Date.now() < end) {
+    const st = await evalOn(c, 'document.readyState', 5000).catch(() => '')
+    if (st === 'complete' || st === 'interactive') {
+      // 光看 readyState 不够：新建的标签页在真正导航前就已经是 complete，
+      // 这时候读到的是 about:blank，页面里 fetch 会被 CORS/同源策略拒掉。
+      if (!target) return true
+      const href = await evalOn(c, 'location.href', 5000).catch(() => '')
+      if (href && href !== 'about:blank' && href.replace(/^https?:\/\/www\./, 'https://').includes(target)) return true
+    }
+    await sleep(250)
+  }
+  return false
+}
+
+/** 从网址里抠主机名，用来判断标签页是不是真的到位了。 */
+function hostOf(url) {
+  try { return new URL(url).host } catch { return '' }
+}
+
+/** 在某条 CDP 连接里导航，等页面加载完（最多 ms）。 */async function navOn(c, url, ms = 15000) {
+  const wait = Number.isFinite(Number(ms)) ? Math.max(1000, Number(ms)) : 15000
+  const loaded = new Promise((resolve) => {
+    const off = c.on('Page.loadEventFired', () => { off(); clearTimeout(t); resolve() })
+    const t = setTimeout(() => { off(); resolve() }, wait)
+  })
+  await c.send('Page.navigate', { url })
+  await loaded
+}
+
 /**
  * 专用浏览器。open() 才会真的启动 / 连接；只读状态的地方不要调它（打开面板不该弹窗口）。
  *
@@ -152,10 +250,12 @@ export function createBrowser({ profileDir, browserPath = () => '', headless = (
   let cdp = null
   let opening = null
   let child = null
+  let port = 0 // 调试端口，attach / launch 时记下；开独立标签页要用
 
   const connected = () => Boolean(cdp && !cdp.closed)
 
-  async function attach(port) {
+  async function attach(p) {
+    port = p
     const { page, extra } = pickPage(await getJson(`http://127.0.0.1:${port}/json/list`), keepRe)
     // 同一个站点开多了就把多的关掉，免得越攒越多
     for (const t of extra) await fetch(`http://127.0.0.1:${port}/json/close/${t.id}`).catch(() => {})
@@ -245,33 +345,78 @@ export function createBrowser({ profileDir, browserPath = () => '', headless = (
     return cdp
   }
 
+  /** 调试端口：连着的时候记着呢；DSH 重启后从资料目录里读回来。 */
+  async function debugPort() {
+    if (port) return port
+    const p = readPortFile(profileDir)
+    if (p && await getJson(`http://127.0.0.1:${p}/json/version`, 1500).catch(() => null)) {
+      port = p
+      return p
+    }
+    throw new Error('浏览器没连上（先 browser_open）')
+  }
+
+  /**
+   * 开一个**自己的**标签页干活，跑完关掉；主页面一根手指都不碰。
+   *
+   * 为什么需要它：全插件共用一个浏览器页面，两个工具同时用就会互相抢页 ——
+   * A 刚把页面导航到抖音，B 把页面拐走，A 读到的就是一片空白（还会把主人正在
+   * 看的页面冲掉、且不恢复）。独立标签页有自己的 CDP 连接，天然并发安全；
+   * 登录态在同一个资料目录里，照样共享。
+   *
+   * 返回 { id, evaluate, goto, close, closed }；务必在 finally 里 close。
+   */
+  async function newTab(url = 'about:blank', { ms = 30000 } = {}) {
+    const p = await debugPort()
+    const t = await newTabAt(p, url, ms)
+    const c = connectCdp(t.webSocketDebuggerUrl)
+    try {
+      await c.ready
+      await c.send('Page.enable')
+      await c.send('Runtime.enable')
+      await c.send('Page.setMuted', { muted: true }).catch(() => {})
+      if (url && url !== 'about:blank') {
+        const ok2 = await waitReady(c, ms, hostOf(url))
+        if (!ok2) throw new Error(`标签页没打开（${hostOf(url) || url}）`)
+      }
+    } catch (error) {
+      c.close()
+      await closeTabAt(p, t.id)
+      throw error
+    }
+    return {
+      id: t.id,
+      get closed() { return c.closed },
+      evaluate: (expression, t2) => evalOn(c, expression, t2),
+      goto: async (u, t2) => {
+        await navOn(c, u, t2)
+        await waitReady(c, t2, hostOf(u))
+      },
+      close: async () => {
+        try { c.close() } catch {}
+        await closeTabAt(p, t.id)
+      },
+    }
+  }
+
+  /** 开标签页干活，不管成没成都关掉。 */
+  async function withTab(url, fn, opts) {
+    const tab = await newTab(url, opts)
+    try {
+      return await fn(tab)
+    } finally {
+      await tab.close()
+    }
+  }
+
   /** 在页面里跑一段表达式，返回值（可以是 Promise）。 */
   async function evaluate(expression, ms = 30000) {
-    const r = await need().send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    }, ms)
-    if (r.exceptionDetails) {
-      throw new Error(
-        r.exceptionDetails.exception?.description?.split('\n')[0]
-        || r.exceptionDetails.text
-        || '页面脚本出错',
-      )
-    }
-    return r.result?.value
+    return evalOn(need(), expression, ms)
   }
 
   /** 打开网址，等页面加载完（最多 ms）。 */
   async function goto(url, ms = 15000) {
-    const c = need()
-    const wait = Number.isFinite(Number(ms)) ? Math.max(1000, Number(ms)) : 15000
-    const loaded = new Promise((resolve) => {
-      const off = c.on('Page.loadEventFired', () => { off(); clearTimeout(t); resolve() })
-      const t = setTimeout(() => { off(); resolve() }, wait)
-    })
-    await c.send('Page.navigate', { url })
-    await loaded
+    return navOn(need(), url, ms)
   }
 
   /** 等某个选择器出现，返回它的中心点和属性；超时返回 null。 */
@@ -542,6 +687,7 @@ export function createBrowser({ profileDir, browserPath = () => '', headless = (
     open, connected, evaluate, goto, waitFor, click, press, pressText, type, typeInto,
     clearFocused, pressEnter, scroll, waitResponse, readPage, readControls,
     screenshot, show, exportCookies, importCookies,
+    newTab, withTab, debugPort,
     close, stopOwn,
     get profileDir() { return profileDir },
   }

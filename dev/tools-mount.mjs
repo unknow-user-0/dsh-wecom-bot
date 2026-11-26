@@ -77,10 +77,13 @@ ok(newWarns === 0, '并发进来没有撞名告警', `多出 ${newWarns} 条`)
 console.log('\n③ 并发之后工具都挂上了，且只挂了一遍')
 const namesAfter = registeredNames()
 ok(namesAfter.length > 0, `挂上了 ${namesAfter.length} 个工具：${namesAfter.join(',')}`)
-// u-mount 是普通白名单用户（非主人），走 social 档：挂 5 个基础工具。
+// u-mount 是普通白名单用户（非主人），走 social 档：挂 6 个基础工具。
 // 原先这里期望 7 个，多出的 wecom_mcp / wecom_group_history 是越权漏洞
 // （群成员能借主人凭据调企微原生能力、查任意会话），本轮已用 adminOnly 挡掉。
-ok(namesAfter.length === 5, '并发后 social 档挂的是 5 个基础工具', `实际 ${namesAfter.length}：${namesAfter.join(',')}`)
+// douyin_watch 是后来加的、有意给全档位：它是「读抖音视频元数据」的有界只读能力，
+// 只能按校验过的视频号调抖音自己的接口，没有任意导航/点击/读文件/发消息，
+// 而且每次干活开独立标签页，不碰主人正在用的页面。
+ok(namesAfter.length === 6, '并发后 social 档挂的是 6 个基础工具', `实际 ${namesAfter.length}：${namesAfter.join(',')}`)
 ok(!namesAfter.includes('wecom_mcp'), 'social 档不含越权工具 wecom_mcp')
 ok(!namesAfter.includes('wecom_group_history'), 'social 档不含越权工具 wecom_group_history')
 

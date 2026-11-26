@@ -41,6 +41,8 @@ import { createBrowserManager } from './browser/manager.js'
 import { createVideoLogin } from './video/login.js'
 import { exposeYtdlp } from './video/binaries.js'
 import { createDouyinResolver } from './video/douyin.js'
+import { createDouyinWatch } from './video/douyin-watch.js'
+import { buildDouyinTools } from './tools/douyin.js'
 import { createAsr } from './video/asr.js'
 
 export const name = 'wecom-bot'
@@ -730,6 +732,11 @@ export function apply(ctx) {
   // src/video/douyin.js 顶部）。这里把浏览器抠直链那条路递给视频工具，
   // 让 video_* 在执行前把抖音链接换成「已下好的本地 mp4」。
   const douyin = createDouyinResolver({ getBrowser: () => browser, dataDir: DATA_DIR, log: logger.child('douyin') })
+  // 抖音「看懂视频」：页面内 API 读标题/摘要/热评，跟上面那条下载 mp4 的路互不影响。
+  // 它每次干活都开一个独立标签页（browser.withTab），不碰主人当前页面，
+  // 两个人同时发抖音链接也不会互相冲掉；能力边界是「只读元数据」，故全档位给。
+  const douyinWatch = createDouyinWatch({ getBrowser: () => browser, log: logger.child('douyin-watch') })
+  const douyinTools = buildDouyinTools({ douyin: douyinWatch })
   const videoReady = buildVideoTools({ ctx, log, douyin })
     .catch((error) => {
       log.warn(`看视频能力没接上：${error.message}`)
@@ -765,6 +772,7 @@ export function apply(ctx) {
       const list = [...wecomTools]
       if (canBrowser) list.push(...browserTools)
       list.push(...video.ok)
+      list.push(...douyinTools)
       return list
     }
     // social（群聊 / 非管理员私聊）：只能发消息、读本会话历史、记点东西、看视频。
@@ -773,6 +781,10 @@ export function apply(ctx) {
     const list = wecomTools.filter((t) => !fileish(t) && !t.adminOnly)
     if (canBrowser) list.push(...browserTools)
     list.push(...video.ok)
+    // douyin_watch 是「读抖音视频元数据」的有界只读能力：只能按校验过的视频号
+    // 调抖音 detail/评论接口，没有任意导航/点击/读文件/发消息，跟会操纵主人
+    // 电脑的 browserTools 不是一回事。群里有人发链接要机器人看懂就靠它，故全档位给。
+    list.push(...douyinTools)
     return list
   }
   async function mountToolsNow(agent, chat, level, sid) {
