@@ -516,7 +516,12 @@ export function apply(ctx) {
       // 附件
       const attachments = []
       for (const img of first.images || []) {
-        attachments.push({ type: 'image', attachment: await admitImage(img) })
+        // admitImage 返回的已经是登记好的完整块 { type:'image', attachment:<ref> }。
+        // 绝不能再套一层 { type:'image', attachment:<那块> } —— 套壳会被写进会话历史，
+        // 之后每轮回放内核读 ref.attachmentId 拿到 undefined → "Attachment reference is invalid."，
+        // 连后面发的纯文字也一起卡死。登记失败时返回 null，下面 filter 会滤掉。
+        const block = await admitImage(img)
+        if (block) attachments.push(block)
       }
       let promptText = merged
       for (const f of first.files || []) {
