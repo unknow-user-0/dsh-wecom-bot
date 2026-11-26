@@ -21,6 +21,8 @@ const STATE = {
   ok: true, version: '0.1.0', enabled: true, connected: true, kicked: false,
   connState: { connected: true, kicked: false, reason: '' },
   ready: true, setupDone: true, guideDone: true, accessMode: 'whitelist', admins: 1,
+  // 视频浏览自检：故意给「没装 yt-dlp」，让安装说明这条分支也被渲染测试覆盖
+  video: { state: 'ok', ytdlp: { ok: false, path: '', set: false, reason: '没找到 yt-dlp' } },
   vault: 'host', dataDir: 'C:\\Users\\Haha\\.dsh\\plugins-data\\wecom-bot',
 }
 const SERVICES = [
@@ -236,11 +238,19 @@ async function main() {
     const must = [
       ['默认不会播放', '动图在手机企微里默认不播的提示'],
       ['动图 51 帧', '选完图「真发出去长什么样」的预告'],
+      ['视频浏览', '登录/yt-dlp/ASR 合并后的一个项'],
+      ['yt-dlp（看视频链接要用）', '夹在登录和 ASR 中间的 yt-dlp 安装提示'],
+      ['没装的话抖音/B站这类链接看不了', '没装 yt-dlp 时的安装说明'],
+      ['语音转文字（ASR）', '合并项里的 ASR 小节'],
     ]
     for (const [needle, what] of must) {
       if (!f.includes(needle)) { console.log(`  ❌ 功能页缺了：${what}（找不到「${needle}」）`); bad++ }
       else console.log(`  ✅ 功能页有：${what}`)
     }
+    // 顺序：yt-dlp 必须夹在「视频站登录」和「语音转文字」中间
+    const iLogin = f.indexOf('视频站登录'), iYtdlp = f.indexOf('yt-dlp（看视频链接要用）'), iAsr = f.indexOf('语音转文字（ASR）')
+    if (!(iLogin >= 0 && iLogin < iYtdlp && iYtdlp < iAsr)) { console.log('  ❌ 视频浏览三块顺序不对（应为 登录 → yt-dlp → ASR）'); bad++ }
+    else console.log('  ✅ 视频浏览三块顺序：登录 → yt-dlp → ASR')
   }
 
   console.log(bad ? `\n❌ ${bad} 个标签页有问题` : `\n✅ ${TABS.length} 个标签页都渲染出来了 → ${OUT}`)

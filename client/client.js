@@ -847,7 +847,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     }
 
     // ---------------- 功能 ----------------
-    function Features({ draft, setD, toast, reload }) {
+    function Features({ draft, setD, toast, reload, st }) {
       // 这里只留「确实需要选」的东西。看视频、收文件、MCP 写、真人身份发消息都不再是开关 ——
       // 它们的边界由「是不是管理员」「是私聊还是群」决定，不靠用户记得去打开。
       const browserMode = draft.features?.browser || 'admin'
@@ -916,8 +916,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         h(Card, { title: '会话放在哪', hint: '每个私聊/每个群一个 DSH 会话，全都落在一个工作区里，侧栏能看到。' },
           h(WorkspaceMigrate, { toast, reload })),
 
-        h(VideoLogin, { toast }),
-        h(Asr, { toast }),
+        h(VideoBrowse, { toast, st }),
       )
     }
 
@@ -1035,7 +1034,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     // 为什么要这个：抖音、B 站有登录态才给高清和不被风控。上游 yt-dlp 只认
     // Netscape 格式的 cookies.txt，让用户自己从 F12 里拼这个文件不现实，
     // 所以做成「点一下开浏览器 → 你自己登录 → 点一下存下来」。
-    function VideoLogin({ toast }) {
+    function VideoLogin({ toast, bare }) {
       const [st, setSt] = useState(null)
       const [busy, setBusy] = useState('')
       const [adv, setAdv] = useState('')        // 展开了哪个站点的高级选项
@@ -1160,23 +1159,28 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           }, adv === s.id ? '收起高级选项' : '高级选项：手动粘贴 cookies.txt'),
           manualBox(s)))
 
-      return h(Card, {
-        title: '视频站登录',
-        hint: st?.jarInUse
-          ? '登录态已生效，看视频时会带上。'
-          : '不登录也能看，但抖音基本看不了、B 站只有低清。',
-        right: h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void load() }, '刷新状态'),
-      },
+      const hintText = st?.jarInUse
+        ? '登录态已生效，看视频时会带上。'
+        : '不登录也能看，但抖音基本看不了、B 站只有低清。'
+      const refresh = h(Btn, { kind: 'ghost', sm: true, disabled: !!busy, onClick: () => void load() }, '刷新状态')
+      const body = h('div', null,
         sites.length === 0 ? h(Empty, null, '读取中…') : sites.map(siteRow),
         st?.jarFile
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } }, '登录态文件：' + st.jarFile)
           : null)
+      // bare：由外层「视频浏览」大 Card 包住，只出内部小节，不套自己的 Card
+      if (bare) return h('div', { style: { marginBottom: 16 } },
+        h('div', { className: 'wb-between', style: { marginBottom: 6 } },
+          h('h4', { style: { margin: 0, fontSize: 13, fontWeight: 650 } }, '视频站登录'), refresh),
+        h('div', { className: 'wb-dim wb-small', style: { marginBottom: 8 } }, hintText),
+        body)
+      return h(Card, { title: '视频站登录', hint: hintText, right: refresh }, body)
     }
 
     // ---------------- 语音转文字 ----------------
     // 上游的台词层要一个 OpenAI 兼容的 /audio/transcriptions 端点，没配就听不见声音，
     // 而且它静默降级、不报错。这块就是把那条隐形依赖摆到台面上。
-    function Asr({ toast }) {
+    function Asr({ toast, bare }) {
       const [st, setSt] = useState(null)
       const [busy, setBusy] = useState('')
       const [form, setForm] = useState({ baseUrl: '', model: '', language: '', key: '' })
@@ -1221,10 +1225,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
 
       const state = st?.state
       const color = state === 'ok' ? '#16a34a' : state === 'down' ? '#b45309' : '#b91c1c'
-      return h(Card, {
-        title: '语音转文字（ASR）',
-        hint: '看视频时听台词要用它。没配也能看，只是听不见声音。',
-      },
+      const asrHint = '看视频时听台词要用它。没配也能看，只是听不见声音。'
+      const body = h('div', null,
         h('div', { className: 'wb-between', style: { marginBottom: 8 } },
           h('div', null,
             h('div', null, '当前状态：',
@@ -1263,6 +1265,44 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h('div', { className: 'wb-dim wb-small' }, o.detail)))) : null,
 
         st?.file ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 10 } }, '配置文件：' + st.file) : null)
+      if (bare) return h('div', null,
+        h('h4', { style: { margin: '0 0 4px', fontSize: 13, fontWeight: 650 } }, '语音转文字（ASR）'),
+        h('div', { className: 'wb-dim wb-small', style: { marginBottom: 8 } }, asrHint),
+        body)
+      return h(Card, { title: '语音转文字（ASR）', hint: asrHint }, body)
+    }
+
+    // ---------------- 视频浏览（登录 + yt-dlp + ASR 合成一个项） ----------------
+    // 这三件都是「看视频」这条链路上的前置条件，原先散成两块 Card，还漏了 yt-dlp
+    // 这一环（它是「链接能不能看」，登录是「看清不清楚」，ASR 是「听不听得到台词」）。
+    function VideoBrowse({ toast, st }) {
+      const y = st?.video?.ytdlp
+      const yOk = !!y?.ok
+      const yColor = yOk ? '#16a34a' : '#b45309'
+      return h(Card, {
+        title: '视频浏览',
+        hint: '让机器人能看视频链接：装 yt-dlp 决定「能不能看」，登录决定「清不清楚、会不会被拦」，语音转文字决定「听不听得到台词」。',
+      },
+        // ① 视频站登录
+        h(VideoLogin, { toast, bare: true }),
+
+        // ② yt-dlp 安装提示（夹在登录和 ASR 中间）
+        h('div', { style: { borderTop: '1px solid var(--wb-line, #eee)', paddingTop: 12, marginBottom: 16 } },
+          h('div', { className: 'wb-between', style: { marginBottom: 6 } },
+            h('h4', { style: { margin: 0, fontSize: 13, fontWeight: 650 } }, 'yt-dlp（看视频链接要用）'),
+            h('span', { className: 'wb-small', style: { color: yColor } },
+              yOk ? '已接入' : (st?.video ? '没找到' : '检查中…'))),
+          h('div', { className: 'wb-dim wb-small' },
+            yOk
+              ? (y.path ? '当前用的：' + y.path : '已由环境变量指定。')
+              : h('span', null,
+                '没装的话抖音/B站这类链接看不了。下载 yt-dlp.exe 放到 ~/.dsh/tools 目录下，'
+                + '或给它设一个 DSH_YTDLP_PATH 指向可执行文件；装好后插件会自动接上。')),
+          y?.reason ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 4 } }, y.reason) : null),
+
+        // ③ 语音转文字
+        h('div', { style: { borderTop: '1px solid var(--wb-line, #eee)', paddingTop: 12 } },
+          h(Asr, { toast, bare: true })))
     }
 
     // ---------------- 额度 ----------------
