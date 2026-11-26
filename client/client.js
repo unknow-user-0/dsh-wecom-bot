@@ -603,7 +603,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               h('div', { className: 'main' },
                 h('div', { className: 't' }, a.name || a.userid),
                 h('div', { className: 'd wb-mono' }, a.userid)),
-              h(Btn, { sm: true, kind: 'ghost', onClick: () => setOpen(open === a.userid ? '' : a.userid) }, open === a.userid ? '收起 MCP' : '配 MCP'),
+              h(Btn, { sm: true, kind: 'primary', onClick: () => setOpen(open === a.userid ? '' : a.userid) }, open === a.userid ? '收起 MCP' : '配 MCP'),
               a.role !== 'owner' ? h(Btn, { sm: true, kind: 'danger', onClick: () => void remove(a.userid) }, '移除') : null),
             open === a.userid ? h('div', { style: { width: '100%', marginTop: 10, paddingTop: 10, borderTop: '1px dashed var(--wb-line)' } },
               h('div', { className: 'wb-row', style: { marginBottom: 8 } },
@@ -983,14 +983,8 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
           h('div', null,
             h('div', null, '收到消息先回一张图'),
             h('div', { className: 'wb-dim wb-small' },
-              '模型回复要等几秒，先发张图/一句话，对方就知道消息收到了（文字在「合并转发」里配）。')),
+              '需要先给主人配置「文档」MCP 权限才能使用本功能。')),
           h(Switch, { on: imageOn, onChange: (v) => setD('merge.placeholderImageOn', v) })),
-
-        // 前置条件放在选图按钮之前：没配上传服务，选了也发不出去，别等选完才发现。
-        st && st.hasUpload === false && imageOn
-          ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 8, color: 'var(--dsw-alias-warning, #b7791f)' } },
-            '发图前先在「用户」页给管理员配一个 disk / mail / doc 服务：企微只认 media_id，图要先上传换 id。没配的话图发不出去，只会发文字。')
-          : null,
 
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' } },
           h('input', {
@@ -1523,10 +1517,9 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const [userid, setUserid] = useState('')
       const [name, setName] = useState('')
       const [mode, setMode] = useState(cfg.accessMode || 'whitelist')
-      const [mcpUrl, setMcpUrl] = useState('')
       const [busy, setBusy] = useState(false)
 
-      const steps = ['填凭据', '认管理员', '选准入', '配 MCP']
+      const steps = ['填凭据', '认管理员', '选准入', '完成']
       const finish = async () => {
         setBusy(true)
         // 只提交「走完向导」这两个标记。以前的 {...cfg} 会拿打开向导那一刻的
@@ -1553,12 +1546,6 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         // 同样只发这一个字段，别把打开向导时的 cfg 快照夹带出去。
         const r = await post('/save', { config: { accessMode: mode } })
         if (r?.ok) setStep(3)
-      }
-      const saveMcp = async () => {
-        if (!mcpUrl.trim()) { await finish(); return }
-        const r = await post('/admin/mcp', { userid: userid.trim() || (cfg.admins[0] && cfg.admins[0].userid), service: 'msg', url: mcpUrl.trim() })
-        if (r?.ok) await finish()
-        else toast(r?.message || 'URL 不对', 'err')
       }
 
       return h('div', { className: 'wb-wizard', onClick: (e) => e.target === e.currentTarget && onClose() },
@@ -1590,11 +1577,10 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             h('div', { className: 'wb-row', style: { marginTop: 16 } },
               h(Btn, { kind: 'primary', onClick: () => void saveMode() }, '就这个'))) : null,
           step === 3 ? h('div', null,
-            h('p', { className: 'wb-hint' }, 'MCP 是可选增强：能读群历史、发文件、操作文档微盘邮件待办日程。填「消息」那个服务的地址就够了，其他随时能补。'),
-            h(Field, { label: '消息服务 StreamableHttp URL', tip: 'https://qyapi.weixin.qq.com/mcp/v2/bot/msg?apikey=…' },
-              h('input', { className: 'wb-input wb-mono', value: mcpUrl, onChange: (e) => setMcpUrl(e.target.value) })),
+            h('p', { className: 'wb-hint' }, 'MCP 是可选增强，共 8 个服务：消息、邮件、文档、待办、日程、会议、微盘、通讯录。配了「消息」能读群历史、发文件；想让机器人「先回一张图」，需要先给主人配「文档」MCP 权限。'),
+            h('p', { className: 'wb-hint', style: { marginTop: 8 } }, '去哪配：面板「用户」页 → 管理员列表 → 找到主人 → 点「配 MCP」→ 选服务标签 → 贴对应的 https://qyapi.weixin.qq.com/mcp/v2/bot/<服务>?apikey=<KEY> → 点「存」，再点「测一下」。只有主人配的才生效。'),
             h('div', { className: 'wb-row', style: { marginTop: 16 } },
-              h(Btn, { kind: 'primary', onClick: () => void saveMcp() }, '存并完成'),
+              h(Btn, { kind: 'primary', onClick: () => void finish() }, '知道了，完成'),
               h(Btn, { kind: 'ghost', onClick: () => void finish() }, '先不配，直接完成'))) : null,
           h('div', { className: 'wb-row', style: { marginTop: 18, justifyContent: 'flex-end' } },
             h('span', { className: 'wb-dim wb-small', style: { marginRight: 'auto' } }, '之后能在「概览 → 打开引导向导」重新进来'),
