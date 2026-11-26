@@ -989,7 +989,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         // 前置条件放在选图按钮之前：没配上传服务，选了也发不出去，别等选完才发现。
         st && st.hasUpload === false && imageOn
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 8, color: 'var(--dsw-alias-warning, #b7791f)' } },
-            '发图前先在「连接」里配一个 disk / mail / doc 服务：企微只认 media_id，图要先上传换 id。没配的话图发不出去，只会发文字。')
+            '发图前先在「用户」页给管理员配一个 disk / mail / doc 服务：企微只认 media_id，图要先上传换 id。没配的话图发不出去，只会发文字。')
           : null,
 
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' } },
