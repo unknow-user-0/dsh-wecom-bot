@@ -102,15 +102,30 @@ export async function lookupChatId(plain, { mcpFor, log: logRaw } = {}) {
  * @param {string} [o.what]  日志里怎么称呼这件事
  * @returns {Promise<any>}
  */
-export async function withChatId(run, { chatId, mcpFor, log: logRaw, what = '发送' } = {}) {
+export async function withChatId(run, { chatId, mcpFor, log: logRaw, what = '发送', trace } = {}) {
   const log = asLog(logRaw)
+  // trace 是可选的「回执」：把这次到底用了哪个 id 写回调用方。
+  // 为什么要这个 —— 成功日志里必须写出真实会话 id，
+  // 否则「换算之后到底发给了谁」在日志里查不出来（2026-11-28 珊瑚那台就是这么卡住的）。
+  // 用回执对象而不是改返回值：五个调用点都指望 run() 的原始返回，动它等于全改。
+  const note = trace && typeof trace === 'object' ? trace : null
   try {
-    return await run(chatId)
+    const r = await run(chatId)
+    if (note) {
+      note.chatId = chatId
+      note.swapped = false
+    }
+    return r
   } catch (error) {
     if (!isInvalidChatId(error)) throw error
     const real = await lookupChatId(chatId, { mcpFor, log: logRaw })
     if (!real || real === chatId) throw error
     log('info', `${what}：这个企业的单聊会话 ID 和 userid 不是一个值，已换成 ${real} 重试。`)
-    return run(real)
+    const r = await run(real)
+    if (note) {
+      note.chatId = real
+      note.swapped = true
+    }
+    return r
   }
 }

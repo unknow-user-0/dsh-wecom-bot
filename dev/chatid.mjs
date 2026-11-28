@@ -223,6 +223,46 @@ function makeMcpFor({ contact = null } = {}) {
 }
 
 // ────────────────────────────────────────────────────────────
+// 三b、trace 回执：调用方要能在成功日志里写出「实际发给了谁」
+//    没有它，日志只能写回调里的原值，而原值可能根本不是真实会话 id ——
+//    2026-11-28 珊瑚那台就是因为日志里看不出「换算后到底发给了谁」，
+//    被别人的错报告带偏去怀疑 media_id 跨服务失效。
+// ────────────────────────────────────────────────────────────
+{
+  resetChatIdCache()
+  const mcpFor = makeMcpFor({ contact: makeContact().client })
+  const trace = { chatId: '', swapped: false }
+  await withChatId(async (id) => ({ ok: true, id }), {
+    chatId: 'ordinary-chat', mcpFor, log: silent, trace,
+  })
+  ok(trace.chatId === 'ordinary-chat', '顺风时回执写明用的是原值')
+  ok(trace.swapped === false, '顺风时回执标明没换算过')
+}
+
+{
+  resetChatIdCache()
+  const c = makeContact({ users: [{ userid: 'real-chat', name: '季游', matched_keywords: ['JiYou'] }] })
+  const mcpFor = makeMcpFor({ contact: c.client })
+  const trace = { chatId: '', swapped: false }
+  await withChatId(
+    async (id) => { if (id === 'JiYou') throw E40073(); return { ok: true, id } },
+    { chatId: 'JiYou', mcpFor, log: silent, trace },
+  )
+  ok(trace.chatId === 'real-chat', '换算后回执给的是真实会话 id')
+  ok(trace.swapped === true, '换算后回执标明动过')
+}
+
+{
+  resetChatIdCache()
+  // 不传 trace 不能炸 —— 另外四个调用点没传
+  const mcpFor = makeMcpFor({ contact: makeContact().client })
+  const out = await withChatId(async (id) => ({ ok: true, id }), {
+    chatId: 'ordinary-chat', mcpFor, log: silent,
+  })
+  ok(out.ok === true, '不传回执也照常工作（别把可选参数做成必需）')
+}
+
+// ────────────────────────────────────────────────────────────
 // 四、别的模块不再各写一份：确认它们都用的是这一处
 // ────────────────────────────────────────────────────────────
 {

@@ -50,7 +50,7 @@ function fakeClient() {
  *   msg            → message_aibot_send 真机验证过的出站通道
  * 只配上传服务、没配 msg 时，应该退回长连接发图（这是要测的分支）。
  */
-function fakeMcp({ ready = true, msg = false } = {}) {
+function fakeMcp({ ready = true, msg = false, badChatId = false } = {}) {
   const state = { uploads: 0, calls: [], sent: [] }
   const mcpFor = async (service) => {
     if (!ready) return null
@@ -59,8 +59,36 @@ function fakeMcp({ ready = true, msg = false } = {}) {
       return {
         async call(name, args) {
           state.calls.push({ service, name, args })
-          if (name === 'message_aibot_send') { state.sent.push(args); return { errcode: 0 } }
+          if (name === 'message_aibot_send') {
+            // 模拟「这个企业的单聊 chat_id 不是 userid」：原值一律 40073，
+            // 换算过（real-chat）才放行 —— 用来测换算成功后有没有留日志。
+            if (badChatId && args?.chat_id !== 'real-chat') {
+              throw Object.assign(
+                new Error("非法的 'chat_id', 请重新检查'chat_id'的值是否正确"),
+                { errcode: 40073 },
+              )
+            }
+            state.sent.push(args)
+            return { errcode: 0 }
+          }
           return { success: true }
+        },
+      }
+    }
+    if (service === 'contact') {
+      if (!badChatId) return null
+      return {
+        async call(name, args) {
+          state.calls.push({ service, name, args })
+          return {
+            errcode: 0,
+            users_count: 1,
+            users: [{
+              userid: 'real-chat',
+              name: '测试人',
+              matched_keywords: (args?.keywords || []).slice(),
+            }],
+          }
         },
       }
     }
@@ -88,13 +116,42 @@ function build({ merge, mcp }) {
     },
   }
   const client = fakeClient()
+  const logs = []
   const ph = createPlaceholder({
     getConfig: () => cfg,
     getClient: () => client,
     mcpFor: mcp.mcpFor,
-    log: () => {},
+    log: (level, text) => logs.push({ level, text: String(text) }),
   })
-  return { ph, client, cfg }
+  return { ph, client, cfg, logs }
+}
+
+// ---- ②c 成功也要留一条记录（以前成功是完全静默的）----
+// 为什么必须测：机制上「成功」和「发出去但对方没收到」在日志里长得一模一样，
+// 2026-11-28 珊瑚那台就是因此被误判成 media_id 跨服务失效。
+{
+  const mcp = fakeMcp({ msg: true })
+  const { ph, logs } = build({ merge: { placeholderOn: false, placeholderImage: IMG }, mcp })
+  ph.fire(frame('r2c'), chat)
+  await sleep(150)
+  const line = logs.find((l) => l.level === 'info' && /预回复图已发出/.test(l.text))
+  check(Boolean(line), '发成功后写了 info 日志（不算太吵，但查得到）', line?.text)
+  check(/MCP message_aibot_send/.test(line?.text || ''), '成功日志写明走的哪条通道')
+  check(/media_id=mid-1/.test(line?.text || ''), '成功日志带 media_id 前段，能对上账')
+  check(/会话 u1/.test(line?.text || ''), '成功日志写明发给了哪个会话')
+  check(!/换算来的/.test(line?.text || ''), '正常企业不标注「换算来的」')
+}
+
+// ---- ②d 换算过 chat_id 的企业：成功日志要说清「发给了换算后的会话」----
+{
+  const mcp = fakeMcp({ msg: true, badChatId: true })
+  const { ph, logs } = build({ merge: { placeholderOn: false, placeholderImage: IMG }, mcp })
+  ph.fire(frame('r2d'), chat)
+  await sleep(200)
+  const line = logs.find((l) => l.level === 'info' && /预回复图已发出/.test(l.text))
+  check(Boolean(line), '换算后发成功也留了日志', line?.text)
+  check(/会话 real-chat/.test(line?.text || ''), '成功日志写的是换算后的真实会话 id')
+  check(/换算来的/.test(line?.text || ''), '成功日志标明了这个 id 是换算来的')
 }
 
 // ---- ① 只配文字 ----

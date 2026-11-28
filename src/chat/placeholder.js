@@ -231,6 +231,10 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
       //   ② 长连接 aibot_send_msg 的 image 帧（文档里认 media_id，但没真机验证）
       // 注意两边字段名不是一套：MCP 是 chat_id/msg_type，长连接是 chatid/chat_type/msgtype。
       const msg = await mcpFor?.('msg')
+      // 回执对象：withChatId 会把「这次实际用了哪个会话 id」写回来。
+      // 成功日志必须写出真实 id，否则「换算之后图到底发给谁了」查不出来。
+      const used = { chatId: chat.chatId, swapped: false }
+      let channel = ''
       if (msg) {
         // 单聊 chat_id 有些企业要的是加密串，不是回调里那个 from.userid。
         // 撞上「非法的 chat_id」才去通讯录换一次再重发，平时零额外请求。
@@ -240,17 +244,30 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
             msg_type: 'image',
             image: { media_id: mediaId },
           }),
-          { chatId: chat.chatId, mcpFor, log, what: '预回复图' },
+          { chatId: chat.chatId, mcpFor, log, what: '预回复图', trace: used },
         )
+        channel = 'MCP message_aibot_send'
       } else {
         await withChatId(
           (id) => client.send(id, chat.kind === 'group' ? 2 : 1, {
             msgtype: 'image',
             image: { media_id: mediaId },
           }),
-          { chatId: chat.chatId, mcpFor, log, what: '预回复图（长连接）' },
+          { chatId: chat.chatId, mcpFor, log, what: '预回复图（长连接）', trace: used },
         )
+        channel = `长连接 aibot_send_msg（chat_type=${chat.kind === 'group' ? 2 : 1}）`
       }
+      // 成功也要留一条记录。
+      // 以前成功是完全静默的，于是「根本没发」和「发出去了但对方没收到」在日志里
+      // 长得一模一样 —— 2026-11-28 珊瑚那台就是卡在这里，害得我们照着别人的错报告
+      // 去怀疑 media_id 跨服务失效（真机一测根本不成立）。
+      // 这条是 info，默认就写：预回复图每个会话只发第一条，量很小，不会刷屏。
+      log(
+        'info',
+        `预回复图已发出：${channel} · ${st ? (st.size / 1048576).toFixed(2) : '?'} MB · ` +
+          `media_id=${String(mediaId).slice(0, 12)}… · 会话 ${used.chatId}` +
+          (used.swapped ? '（这个企业的单聊会话 ID 是换算来的）' : ''),
+      )
       failReason = ''
       authHint = ''
       failedKey = ''
