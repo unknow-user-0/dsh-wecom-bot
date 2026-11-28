@@ -235,5 +235,29 @@ function makeMcpFor({ contact = null } = {}) {
   }
 }
 
+// ────────────────────────────────────────────────────────────
+// 五、排查脚本不许有自己的一套判定
+//
+// 这里踩过一次：dev/diagnose-chatid.mjs 原来自己写了一套结论，插件那边修好后
+// 它没跟上，于是同一个问题两处给出互相矛盾的答案 —— 而且它推荐的那条退路
+// （改走被动回复发图）早在真机上证伪了（40007 invalid media_id）。
+// 离线脚本存在的理由只是「插件没跑起来时还能读磁盘上的配置」，
+// 判定必须来自 src/wecom/diagnose.js，否则迟早再漂一次。
+// ────────────────────────────────────────────────────────────
+{
+  const { readFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const root = join(import.meta.dirname, '..')
+  const text = readFileSync(join(root, 'dev/diagnose-chatid.mjs'), 'utf8')
+
+  ok(/from '\.\.\/src\/wecom\/diagnose\.js'/.test(text) || /import\('\.\.\/src\/wecom\/diagnose\.js'\)/.test(text),
+    '离线排查脚本调的是 src/wecom/diagnose.js')
+  ok(!/classify\s*\(/.test(text), '离线脚本里没有自己的 classify（判定不许重写）')
+  // 只查「会不会被输出给用户」：注释里提这条历史是应该的，输出里再出现就是误导
+  ok(!/line\([^)]*改走被动回复/.test(text), '输出文案里不再推荐「改走被动回复发图」那条已被证伪的路')
+  ok(!/line\([^)]*直接传 userid 一般能过/.test(text), '输出文案里不再给出「直接传 userid 一般能过」这种没验证的结论')
+  ok(/只读|不发送/.test(text), '脚本自己写明是只读的')
+}
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`)
 process.exit(fail ? 1 : 0)

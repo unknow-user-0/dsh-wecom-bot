@@ -1,20 +1,21 @@
 #!/usr/bin/env node
-// 诊断：单聊的 chat_id 到底该传什么
+// 离线排查：单聊的 chat_id 到底该传什么
 //
-// 背景：有个企业（userid 是后台明文 `JiYou` 那种）发图时报
-//   「非法的 'chat_id', 请重新检查'chat_id'的值是否正确」
-// 而文字一直正常 —— 因为文字走被动回复（req_id），完全不碰 chat_id。
-// 另一个企业（userid 是 `wofL_hCgAA...` 加密串）就没这个问题。
+// 这个脚本和面板里那张「排查」卡片是同一套判定 —— 都调 src/wecom/diagnose.js。
+// 它存在的唯一理由是：插件能点面板，就得先连上 DSH；连不上的时候，
+// 用户还能在终端里跑一下，读的是磁盘上的配置，不依赖插件运行时。
 //
-// 所以怀疑：单聊的 chat_id 是不是等于 userid，**取决于企业配置**。
+// ⚠ 曾经这里自己写了一套判定，结果插件那边修好了、这里没跟上，
+//   两处结论互相矛盾（旧版还推荐「改走被动回复发图」，那条路早已被真机证伪：
+//   doc 服务换来的 media_id 走 aibot_respond_msg 报 40007 invalid media_id）。
+//   所以现在这里是**薄壳**：只负责「在没有插件运行时的环境下把配置读出来」，
+//   判定一个字都不许重写。
 //
-// 这个脚本只读不写：不发明消息内容、不改配置，只列会话 + 打一次最小请求。
-// 在插件目录下跑：
-//   node dev/diagnose-chatid.mjs
-// 把全部输出发给维护者。
+// 用法：
+//   node dev/diagnose-chatid.mjs            只看结论
+//   node dev/diagnose-chatid.mjs --verbose  连每一步的日志一起看
 //
-// 想看更细（包括请求/响应原文）：
-//   node dev/diagnose-chatid.mjs --verbose
+// 只读：只列会话、只查通讯录，一条消息都不发。
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -22,178 +23,106 @@ import { homedir } from 'node:os'
 
 const VERBOSE = process.argv.includes('--verbose')
 
-const DATA_DIR = process.env.DSH_HOME
-  ? join(process.env.DSH_HOME, 'plugins-data', 'wecom-bot')
-  : join(process.env.USERPROFILE || homedir(), '.dsh', 'plugins-data', 'wecom-bot')
+const HOME = process.env.DSH_HOME
+  || join(process.env.USERPROFILE || homedir(), '.dsh')
+// 插件和凭据库都以 DSH_HOME 为准，这里先摆好再 import ——
+// src/core/config.js 是在模块加载时算 DATA_DIR 的，顺序错了就读到别的目录。
+process.env.DSH_HOME = HOME
+
+const DATA_DIR = join(HOME, 'plugins-data', 'wecom-bot')
 const CONFIG_FILE = join(DATA_DIR, 'config.json')
+const CRED_FILE = join(HOME, '.credentials.yaml')
 
 function line(s = '') { process.stdout.write(s + '\n') }
-function section(t) { line(''); line('='.repeat(60)); line(t); line('='.repeat(60)) }
+function section(t) { line(''); line('='.repeat(64)); line(t); line('='.repeat(64)) }
 
-function mask(s) {
-  const v = String(s || '')
-  if (v.length <= 8) return v ? v[0] + '***' : '（空）'
-  return v.slice(0, 4) + '***' + v.slice(-4) + `（长 ${v.length}）`
-}
-
-/** 极简 MCP 客户端：只够跑 initialize + tools/call */
-async function makeClient(url, verbose) {
-  let nextId = 1
-  const rpc = async (method, params) => {
-    const id = nextId++
-    const req = { jsonrpc: '2.0', id, method, params }
-    if (verbose) line(`→ ${JSON.stringify(req).slice(0, 800)}`)
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-      },
-      body: JSON.stringify(req),
-      signal: AbortSignal.timeout(20000),
-    })
-    const text = await res.text()
-    if (verbose) line(`← HTTP ${res.status} ${text.slice(0, 1200)}`)
-    // 可能是 SSE（data: {...}），也可能是裸 JSON
-    const dataLine = text.split('\n').find((l) => l.trim().startsWith('data:'))
-    const payload = JSON.parse((dataLine || text).replace(/^data:\s*/, ''))
-    if (payload.error) throw new Error(`${method} 失败：${JSON.stringify(payload.error).slice(0, 300)}`)
-    return payload.result
+/** 从 .credentials.yaml 里抠出某个 ref 的值（离线环境下没法用插件的凭据服务） */
+function readCredRefs() {
+  let text = ''
+  try { text = readFileSync(CRED_FILE, 'utf8') } catch { return {} }
+  const out = {}
+  for (const raw of text.split(/\r?\n/)) {
+    const m = /^\s{0,4}([A-Za-z_][A-Za-z0-9_]*):\s*(.+?)\s*$/.exec(raw)
+    if (!m) continue
+    const value = m[2].replace(/^['"]|['"]$/g, '')
+    if (/^https?:\/\//.test(value)) out[m[1]] = value
   }
-  await rpc('initialize', {
-    protocolVersion: '2024-11-05',
-    capabilities: {},
-    clientInfo: { name: 'dsh-wecom-bot-diagnose', version: '1' },
-  })
-  const call = async (name, args = {}) => {
-    const r = await rpc('tools/call', { name, arguments: args })
-    // 企微把业务错误也包在 result.content[0].text 里（isError 常是 false），必须解包
-    const raw = r?.content?.[0]?.text ?? ''
-    let parsed = null
-    try { parsed = JSON.parse(raw) } catch { /* 不是 JSON 就算了 */ }
-    return { ok: parsed ? Number(parsed.errcode ?? 0) === 0 : false, parsed, raw }
-  }
-  return { rpc, call }
-}
-
-/** 从会话列表里判断这个企业的单聊 chat_id 长什么样 */
-function classify(sessions) {
-  const singles = sessions.filter((s) => String(s?.chat_type || '') === 'single')
-  if (!singles.length) {
-    return { kind: 'no-single', note: '会话列表里没有单聊会话 —— 先跟机器人私聊一句话再来跑这个脚本' }
-  }
-  // 加密形态：企微加密 userid 通常是 4+24 位 base64url 风格（wofL_hCgAA...）
-  const looksEncrypted = (id) => /^w[A-Za-z0-9_-]{20,}$/.test(String(id || ''))
-  const enc = singles.filter((s) => looksEncrypted(s.chat_id)).length
-  if (enc === singles.length) {
-    return {
-      kind: 'encrypted',
-      note: '单聊 chat_id 都是加密串（w 开头、20 位以上）。这种企业里 chat_id 通常就等于加密后的 userid，直接传 userid 一般能过。',
-    }
-  }
-  if (enc === 0) {
-    return {
-      kind: 'plain',
-      note: '单聊 chat_id 是普通字符串（不是加密串）。这种企业里 chat_id **很可能不等于** 明文 UserID，直接把 userid 当 chat_id 传就会被拒。',
-    }
-  }
-  return { kind: 'mixed', note: '单聊 chat_id 有的加密有的不加密，情况比较特殊。' }
+  return out
 }
 
 async function main() {
-  line(`诊断时间：${new Date().toISOString()}`)
-  line(`数据目录：${DATA_DIR}`)
+  const { loadConfig } = await import('../src/core/config.js')
+  const { createMcpClient } = await import('../src/wecom/mcp.js')
+  const { mcpRef } = await import('../src/core/vault.js')
+  const { diagnoseChatId } = await import('../src/wecom/diagnose.js')
+
+  line(`离线排查：${new Date().toISOString()}`)
+  line(`DSH_HOME：${HOME}`)
   line(`node：${process.version} / ${process.platform}`)
 
-  section('1. 配置')
   let cfg
   try {
-    cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'))
+    cfg = loadConfig()
   } catch (error) {
-    line(`读不到配置：${error.message}`)
-    line('先确认插件跑起来过一次（配置里要有管理员和 MCP 地址）。')
-    process.exit(1)
-  }
-  const admins = Array.isArray(cfg.admins) ? cfg.admins : []
-  line(`管理员 ${admins.length} 个：`)
-  for (const a of admins) {
-    line(`  · userid=${a.userid} name=${a.name} role=${a.role}`)
-    line(`    userid 形态：${/^w[A-Za-z0-9_-]{20,}$/.test(String(a.userid)) ? '加密串' : '明文（像是企微后台的 UserID）'}`)
-    const mcp = a.mcp || {}
-    const svcs = Object.keys(mcp).filter((k) => mcp[k])
-    line(`    配了 MCP：${svcs.length ? svcs.join(', ') : '（无）'}`)
-  }
-
-  const owner = admins.find((a) => a.role === 'owner') || admins[0]
-  if (!owner) {
-    line('没有管理员，退出。')
-    process.exit(1)
-  }
-  const msgUrl = owner.mcp?.msg
-  if (!msgUrl) {
-    line('')
-    line(`管理员 ${owner.userid} 没配 msg 服务的 MCP 地址，后面的都没法测。`)
-    line('去面板「用户 → 配置 MCP」把 msg 那一格填上再来。')
+    section('读不到配置')
+    line(`路径：${CONFIG_FILE}`)
+    line(`原因：${error.message}`)
+    line('先在 DSH 里把插件跑起来一次（面板里填好 bot_id 和 MCP），再来跑这个。')
     process.exit(1)
   }
 
-  section('2. 连 msg 服务')
-  line(`地址：${mask(msgUrl)}`)
-  const mc = await makeClient(msgUrl, VERBOSE)
-  line('initialize 成功。')
+  // 地址的真身在凭据库，配置文件里那份只是副本（2026-11 修过一次这个认知）。
+  // 离线时用不到插件的 vault 服务，所以这里按同样的优先级手工取一遍：
+  // 先查凭据库的 ref，取不到再退回配置文件里的明文。
+  const creds = readCredRefs()
+  if (VERBOSE && Object.keys(creds).length) {
+    line(`凭据库：读到 ${Object.keys(creds).length} 条 https 类凭据`)
+  }
+  const pool = new Map()
+  const mcpFor = async (service, userid) => {
+    const owner = (cfg.admins || []).find((a) => a.role === 'owner') || (cfg.admins || [])[0]
+    const uid = userid || owner?.userid
+    const plain = owner?.mcp?.[service]
+    const ref = uid ? mcpRef(service, uid) : ''
+    const url = (ref && creds[ref]) || plain
+    if (!url) return null
+    if (VERBOSE) line(`  [mcp] ${service} → ${url.slice(0, 48)}…（${creds[ref] ? '凭据库' : '配置文件'}）`)
+    if (!pool.has(url)) {
+      pool.set(url, await createMcpClient(url, {
+        log: VERBOSE ? (level, text) => line(`  [${level}] ${text}`) : () => {},
+      }))
+    }
+    return pool.get(url)
+  }
 
-  section('3. 会话列表（这是判断 chat_id 形态的唯一依据）')
-  const list = await mc.call('message_aibot_sessions_list', {})
-  if (!list.ok) {
-    line(`拉会话列表失败：${list.raw.slice(0, 400)}`)
+  const r = await diagnoseChatId({
+    cfg,
+    mcpFor,
+    log: VERBOSE ? (level, text) => line(`[${level}] ${text}`) : undefined,
+  })
+
+  if (!r?.ok) {
+    section('排查没跑起来')
+    line(String(r?.message || '未知原因'))
     process.exit(1)
   }
-  const sessions = Array.isArray(list.parsed?.sessions) ? list.parsed.sessions : []
-  line(`共 ${sessions.length} 个会话：`)
-  for (const s of sessions) {
-    line(`  · chat_type=${s.chat_type} chat_id=${s.chat_id}`)
-    line(`    chat_name=${JSON.stringify(s.chat_name)}  last_msg_time=${s.last_msg_time || '（无）'}`)
-    line(`    chat_id 形态：${/^w[A-Za-z0-9_-]{20,}$/.test(String(s.chat_id || '')) ? '加密串' : '明文/普通字符串'}`)
-  }
 
-  section('4. 结论')
-  const verdict = classify(sessions)
-  line(`判断：${verdict.kind}`)
-  line(verdict.note)
+  section('结论')
+  line(r.lines.join('\n'))
 
-  const singles = sessions.filter((s) => String(s?.chat_type || '') === 'single')
-  const adminIds = new Set(admins.map((a) => String(a.userid)))
-  const matched = singles.filter((s) => adminIds.has(String(s.chat_id)))
+  section('怎么用这份结果')
+  line('· 结论是「看着没问题」：那这次发不出去就不是会话 ID 的事，')
+  line('  打开面板「日志」页的「详细日志」，复现一次，把新出现的日志发出来。')
+  line('· 结论说「换算不出来 / 没配 contact」：按里面写的下一步去做。')
+  line('· 报告里的 ID 都已脱敏，可以直接整份发出去。')
   line('')
-  if (matched.length) {
-    line(`✅ 会话列表里有 chat_id 与管理员 userid **完全相同** 的单聊会话：`)
-    for (const s of matched) line(`   ${s.chat_id}（${s.chat_name}）`)
-    line('   说明这个企业 chat_id == userid，直接传 userid 是对的。')
-    line('   那这次发图失败就不是 chat_id 的问题，得看别的（把上面的 --verbose 输出也发来）。')
-  } else {
-    line(`❌ 会话列表里**没有**哪个单聊 chat_id 等于管理员 userid。`)
-    line(`   管理员 userid：${[...adminIds].join(' / ')}`)
-    line(`   会话里的 chat_id：${singles.map((s) => s.chat_id).join(' / ') || '（没有单聊）'}`)
-    line('')
-    line('   → 这就是根因：这个企业的单聊会话 ID 和 userid 不是一个值，')
-    line('     插件把 userid 当 chat_id 传，企微就回「非法的 chat_id」。')
-    line('     文字之所以没事，是因为文字走被动回复（req_id），压根不用 chat_id。')
-  }
+  line(`（整体判定：${r.level}）`)
 
-  section('5. 关键问题：能不能靠会话列表反查')
-  line('sessions_list 的返回里只有 chat_id / chat_name / chat_type / last_msg_time，')
-  line('**没有 userid**。所以如果 chat_id ≠ userid，插件无法靠它把「谁」和「哪个 chat_id」对上。')
-  line('')
-  if (!matched.length) {
-    line('这就意味着「按 userid 反查 chat_id」这条路走不通 —— 需要换思路（改走被动回复发图）。')
-  }
-
-  line('')
-  line('诊断结束。把上面全部输出（加 --verbose 更好）发给维护者。')
+  process.exit(r.level === 'err' ? 2 : 0)
 }
 
 main().catch((error) => {
   line('')
-  line(`诊断脚本自己出错了：${error?.stack || error}`)
+  line(`排查脚本自己出错了：${error?.stack || error}`)
   process.exit(1)
 })
