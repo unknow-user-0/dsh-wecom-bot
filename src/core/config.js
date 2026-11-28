@@ -44,11 +44,11 @@ export const DEFAULTS = {
     maxSec: 8,             // 私聊：最多等几秒
     groupWaitSec: 5,       // 群聊：等得久一点把一段话攒齐
     groupMaxSec: 15,
-    // 收到消息先回一句「我收到了」—— 企微没有「正在输入」提示，不给这句对方会以为没发出去。
+    // 预回复「我收到了」—— 企微没有「正在输入」提示，不给这句对方会以为没发出去。
     // 关掉就彻底安静（模型想好了再直接给答案），适合不想看到多余气泡的人。
     placeholderOn: true,
-    placeholder: 'emmm...', // 占位文案，可自定义
-    // 占位图：本地图片路径（面板上从本地选一张，存进插件数据目录）。
+    placeholder: 'emmm...', // 预回复文案（键名沿用 placeholder，老配置不用改），可自定义
+    // 预回复图：本地图片路径（面板上从本地选一张，存进插件数据目录）。
     // 文字和图片都配了就都发；只配一个就发那个；配了图但没 MCP 时图发不出去（见 chat/placeholder.js）。
     placeholderImage: '',
     // 发图必须走 MCP 的 media_upload 换 media_id（长连接只认 media_id，没有 URL 通道）。
@@ -165,7 +165,7 @@ function normalize(c) {
   c.merge.maxSec = num(c.merge.maxSec, 1, 60, 8)
   c.merge.groupWaitSec = num(c.merge.groupWaitSec, 0.5, 10, 5)
   c.merge.groupMaxSec = num(c.merge.groupMaxSec, 1, 60, 15)
-  // 占位开关：老的配置里没有这个键，缺省给 true（保持以前的行为）
+  // 预回复开关：老的配置里没有这个键，缺省给 true（保持以前的行为）
   if (typeof c.merge.placeholderOn !== 'boolean') c.merge.placeholderOn = true
   if (!c.merge.placeholder) c.merge.placeholder = 'emmm...'
   if (typeof c.merge.placeholderImage !== 'string') c.merge.placeholderImage = ''

@@ -63,7 +63,7 @@ const ROUTES = {
     { at: now - 3600e3, kind: 'in', chatId: 'wrABC123', name: '太子群', text: '@海棠 看下这个表格' },
   ], stats: { chats: 2, today: 3 } },
   '/quota': { ok: true, usage: { date: '2026-11-16', global: 1_234_567, chats: { 'dm:wofL_…': 800_000, 'group:wrABC123': 434_567 } } },
-  // 占位图状态：故意给一张「动图但不用压」的，让功能页把「发出去长什么样」
+  // 预回复图状态：故意给一张「动图但不用压」的，让功能页把「发出去长什么样」
   // 和「企微里要手动点开才动」这两行都渲染出来。以前没有这个桩，
   // 功能页一直走「没选图」的分支，新加的提示等于没被测试覆盖过。
   '/placeholder/state': { ok: true, image: 'C:\\\\Users\\\\Haha\\\\.dsh\\\\plugins-data\\\\wecom-bot\\\\placeholder.gif', bytes: 227_825, hasUpload: true, lastImageError: '', preview: {
@@ -239,8 +239,8 @@ async function main() {
       ['默认不会播放', '动图在手机企微里默认不播的提示'],
       ['动图 51 帧', '选完图「真发出去长什么样」的预告'],
       ['视频浏览', '登录/yt-dlp/ASR 合并后的一个项'],
-      ['yt-dlp（看视频链接要用）', '夹在登录和 ASR 中间的 yt-dlp 安装提示'],
-      ['没装的话抖音/B站这类链接看不了', '没装 yt-dlp 时的安装说明'],
+      ['yt-dlp（B 站等站点要用，抖音不需要）', '夹在登录和 ASR 中间的 yt-dlp 安装提示'],
+      ['没装的话 B 站这类链接看不了；抖音不受影响', '没装 yt-dlp 时的安装说明'],
       ['语音转文字（ASR）', '合并项里的 ASR 小节'],
     ]
     for (const [needle, what] of must) {
@@ -248,7 +248,7 @@ async function main() {
       else console.log(`  ✅ 功能页有：${what}`)
     }
     // 顺序：yt-dlp 必须夹在「视频站登录」和「语音转文字」中间
-    const iLogin = f.indexOf('视频站登录'), iYtdlp = f.indexOf('yt-dlp（看视频链接要用）'), iAsr = f.indexOf('语音转文字（ASR）')
+    const iLogin = f.indexOf('视频站登录'), iYtdlp = f.indexOf('yt-dlp（B 站等站点要用，抖音不需要）'), iAsr = f.indexOf('语音转文字（ASR）')
     if (!(iLogin >= 0 && iLogin < iYtdlp && iYtdlp < iAsr)) { console.log('  ❌ 视频浏览三块顺序不对（应为 登录 → yt-dlp → ASR）'); bad++ }
     else console.log('  ✅ 视频浏览三块顺序：登录 → yt-dlp → ASR')
   }

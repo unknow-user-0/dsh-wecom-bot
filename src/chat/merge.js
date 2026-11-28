@@ -4,7 +4,7 @@
 // ⚠ 企微特有的两个坑：
 //   1. 合并后只能回复最后一条的 req_id —— 前几条的 req_id 作废（回两次会重复发）
 //   2. 企微没有「正在输入」提示（caps.typing = false），用户会以为没收到
-//      → 收到第一条就先回一个占位（默认 emmm...），超过阈值还没处理完再说一句
+//      → 收到第一条就先回一句预回复（默认 emmm...），超过阈值还没处理完再说一句
 
 import { fireAndForget } from '../core/safe.js'
 
@@ -12,9 +12,9 @@ import { fireAndForget } from '../core/safe.js'
 const SLOW_NOTICE_MS = 8_000
 
 /**
- * 要不要发占位。
+ * 要不要发预回复。
  * 文字和图片各有开关：只配了图的人用 placeholderOn=false 关掉文字，
- * 但他仍然想收到图片占位 —— 所以两个都关才是「彻底安静」。
+ * 但他仍然想收到预回复图 —— 所以两个都关才是「彻底安静」。
  */
 function wantsPlaceholder(cfg) {
   const m = cfg?.merge || {}
@@ -55,7 +55,7 @@ export function createMerger({ log, onFlush, onPlaceholder }) {
     entry.lastAt = Date.now()
     entry.lastFrame = frame          // 只回最后一条的 req_id
 
-    // 第一条消息：占位（文字 / 图片 / 都发）
+    // 第一条消息：预回复（文字 / 图片 / 都发）
     // 开关在面板「功能」栏。关掉就彻底不出声 —— 有人嫌「emmm...」多余，
     // 也有人（群里）觉得没有它就像消息石沉大海。默认开。
     //
@@ -65,7 +65,7 @@ export function createMerger({ log, onFlush, onPlaceholder }) {
       entry.sentPlaceholder = true
       try { onPlaceholder?.(frame, normalized.chat) } catch {}
       entry.slowTimer = setTimeout(() => {
-        // 8 秒还没处理完 —— 再说一句（占位已经发过了，这里只记日志不重复发）
+        // 8 秒还没处理完 —— 再说一句（预回复已经发过了，这里只记日志不重复发）
         log.debug(`合并等待已超 ${SLOW_NOTICE_MS / 1000} 秒，仍在攒消息`)
       }, SLOW_NOTICE_MS)
       entry.slowTimer.unref?.()

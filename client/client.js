@@ -928,7 +928,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             '触发点两个：群里被 @、断线重连。补的时候先补最近的，一批塞不下就分几批，不会一次性把上下文撑爆。')),
 
         h(Card, {
-          title: '收到消息先回一句',
+          title: '预回复',
           hint: '企微没有「正在输入」提示，不吭声对方会以为没发出去。关掉就彻底安静，等模型想好了直接给答案。',
         },
           h('div', { className: 'wb-between' },
@@ -952,7 +952,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       )
     }
 
-    // ---------------- 占位图（收到消息先回一张图） ----------------
+    // ---------------- 预回复补一张图 ----------------
     // 为什么要有：有人觉得「emmm...」太机械，回个自家形象/招牌图更像活人。
     // 为什么不能让用户填路径：浏览器里 input file 拿不到真实本地路径，
     // 所以走「选文件 → 读成 base64 → 传给宿主存进插件数据目录」这条路。
@@ -986,7 +986,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
             const pv = r.preview
             if (pv?.dropped) toast?.(`动图 ${pv.pages} 帧会抽成 ${pv.finalPages} 帧（播放速度不变）`)
             else if (pv?.animated) toast?.(`动图 ${pv.pages} 帧，${(pv.durationMs / 1000).toFixed(1)} 秒，就这样发`)
-            else toast?.('占位图已保存')
+            else toast?.('预回复图已保存')
             await load()
             reload?.()
           } else toast?.(r?.message || '保存失败')
@@ -1002,19 +1002,38 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         setBusy(true)
         try {
           const r = await post('/placeholder/clear', {})
-          if (r?.ok) { toast?.('已清掉占位图'); await load(); reload?.() } else toast?.(r?.message || '清不掉')
+          if (r?.ok) { toast?.('已清掉预回复图'); await load(); reload?.() } else toast?.(r?.message || '清不掉')
         } finally { setBusy(false) }
       }
 
       const imageOn = draft.merge?.placeholderImageOn !== false
       const has = Boolean(st?.image)
+      // 卡片上的前提条件要如实反映「现在到底能不能发」，
+      // 不能写一句固定的「需要配文档 MCP」让用户自己去猜配没配。
+      // st 还没加载回来时是 null —— 那时不能冒充「已就绪」，只能先不提。
+      const canUpload = st ? st.hasUpload !== false : null
+      const kind = st?.lastImageKind || ''
+      // 失败原因按类给下一步动作：不是图的问题就别让人去换图。
+      const nextStep = (() => {
+        if (!kind) return ''
+        if (kind === 'image') return '去上面换一张（太大的先缩小）'
+        if (kind === 'auth') return '点上面的「去企微授权」'
+        if (kind === 'config') return '去「用户 → 配置 MCP」把 disk / mail / doc 填一个'
+        if (kind === 'chat') return '检查这个会话还在不在（群解散 / 人被移出）'
+        if (kind === 'remote') return '等一会儿，它会自己重试'
+        return '照原文报错查一下'
+      })()
 
       return h('div', { style: { marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--dsw-alias-border-subtle, rgba(128,128,128,.2))' } },
         h('div', { className: 'wb-between' },
           h('div', null,
-            h('div', null, '收到消息先回一张图'),
+            h('div', null, '预回复补一张图'),
             h('div', { className: 'wb-dim wb-small' },
-              '需要先给主人配置「文档」MCP 权限才能使用本功能。')),
+              canUpload === null
+                ? '企微的图片只认 media_id，需要 disk / mail / doc 里至少配一个 MCP 服务。'
+                : canUpload
+                  ? '上传通道已就绪：图片先传到企微换成 media_id，再作为图片消息发出去。'
+                  : '还发不了：企微的图片只认 media_id，需要 disk / mail / doc 里至少配一个 MCP 服务。')),
           h(Switch, { on: imageOn, onChange: (v) => setD('merge.placeholderImageOn', v) })),
 
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginTop: 10, flexWrap: 'wrap' } },
@@ -1059,11 +1078,12 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         st?.lastImageError
           ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 6, color: 'var(--dsw-alias-warning, #b7791f)' } },
             '上次发图失败：' + st.lastImageError,
+            nextStep ? h('div', { style: { marginTop: 2, opacity: 0.85 } }, '下一步：' + nextStep) : null,
             st.lastImageAuthUrl
-              ? h('a', {
+              ? h('div', null, h('a', {
                 href: st.lastImageAuthUrl, target: '_blank', rel: 'noreferrer noopener',
-                style: { marginLeft: 8, color: 'inherit', textDecoration: 'underline', fontWeight: 600 },
-              }, '去企微授权')
+                style: { color: 'inherit', textDecoration: 'underline', fontWeight: 600 },
+              }, '去企微授权'))
               : null)
           : null)
     }
@@ -1319,7 +1339,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
       const yColor = yOk ? '#16a34a' : '#b45309'
       return h(Card, {
         title: '视频浏览',
-        hint: '让机器人能看视频链接：装 yt-dlp 决定「能不能看」，登录决定「清不清楚、会不会被拦」，语音转文字决定「听不听得到台词」。',
+        hint: '让机器人能看视频链接：抖音走插件自己的浏览器（不用额外装东西），B 站这类站点靠 yt-dlp，登录决定「清不清楚、会不会被拦」，语音转文字决定「听不听得到台词」。',
       },
         // ① 视频站登录
         h(VideoLogin, { toast, bare: true }),
@@ -1327,14 +1347,15 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         // ② yt-dlp 安装提示（夹在登录和 ASR 中间）
         h('div', { style: { borderTop: '1px solid var(--wb-line, #eee)', paddingTop: 12, marginBottom: 16 } },
           h('div', { className: 'wb-between', style: { marginBottom: 6 } },
-            h('h4', { style: { margin: 0, fontSize: 13, fontWeight: 650 } }, 'yt-dlp（看视频链接要用）'),
+            h('h4', { style: { margin: 0, fontSize: 13, fontWeight: 650 } }, 'yt-dlp（B 站等站点要用，抖音不需要）'),
             h('span', { className: 'wb-small', style: { color: yColor } },
               yOk ? '已接入' : (st?.video ? '没找到' : '检查中…'))),
           h('div', { className: 'wb-dim wb-small' },
             yOk
               ? (y.path ? '当前用的：' + y.path : '已由环境变量指定。')
               : h('span', null,
-                '没装的话抖音/B站这类链接看不了。下载 yt-dlp.exe 放到 ~/.dsh/tools 目录下，'
+                '没装的话 B 站这类链接看不了；抖音不受影响（它走插件自己的浏览器，不需要 yt-dlp）。'
+                + '要装就下载 yt-dlp.exe 放到 ~/.dsh/tools 目录下，'
                 + '或给它设一个 DSH_YTDLP_PATH 指向可执行文件；装好后插件会自动接上。')),
           y?.reason ? h('div', { className: 'wb-dim wb-small', style: { marginTop: 4 } }, y.reason) : null),
 
@@ -1565,20 +1586,34 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
     function Logs({ toast }) {
       const [rows, setRows] = useState([])
       const [auto, setAuto] = useState(true)
-      const load = useCallback(async () => { const r = await get('/logs'); if (r?.ok) setRows(r.rows || []) }, [])
+      const [dbg, setDbg] = useState(false)
+      const load = useCallback(async () => {
+        const r = await get('/logs')
+        if (r?.ok) { setRows(r.rows || []); setDbg(Boolean(r.debug)) }
+      }, [])
       useEffect(() => { void load() }, [load])
       useEffect(() => {
         if (!auto) return
         const t = setInterval(() => void load(), 2500)
         return () => clearInterval(t)
       }, [auto, load])
+      const toggleDebug = async (on) => {
+        setDbg(on)
+        const r = await post('/logs/debug', { on })
+        if (r?.ok) void load()
+        else toast(r?.message || '没切过来', 'err')
+      }
       return h('div', { className: 'wb-page' },
         h(Card, {
           title: '插件日志', hint: '密钥都会被抹掉再落盘。',
           right: h('div', { className: 'wb-row' },
+            h('span', { className: 'wb-switch-row', title: '打开后会把排障细节也记下来。出了问题先打开，再复现一次，别重启。' },
+              h(Switch, { on: dbg, onChange: (v) => void toggleDebug(v) }),
+              h('span', { className: 'lbl' }, '详细日志')),
             h('span', { className: 'wb-switch-row' }, h(Switch, { on: auto, onChange: setAuto }), h('span', { className: 'lbl' }, '自动刷新')),
             h(Btn, { sm: true, kind: 'ghost', onClick: () => void load() }, '刷新')),
         },
+          dbg ? h('p', { className: 'wb-hint' }, '详细日志已开：文件会变大一些，排查完记得关掉。') : null,
           rows.length
             ? h('div', { className: 'wb-logs' }, rows.slice().reverse().map((l, i) => h('div', { key: i, className: 'wb-log' },
               h('span', { className: 't' }, new Date(l.at).toLocaleTimeString()),

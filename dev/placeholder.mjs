@@ -1,6 +1,6 @@
-// 「收到消息先回一句」的开关：开着要回这句话，关掉一个字都不能多。
+// 「预回复」的开关：开着要回这句话，关掉一个字都不能多。
 //
-// 为什么单独一个测试：占位是每条消息进来时立刻发的，和合并窗口、模型跑一轮
+// 为什么单独一个测试：预回复是每条消息进来时立刻发的，和合并窗口、模型跑一轮
 // 是三条并行的时间线。e2e 只在找回复时顺手跳过 'emmm...'，从来没断言过它
 // 该不该出现 —— 所以「关掉」这个功能就算写反了也不会有人发现，
 // 直到用户看到自己明明关了还在被刷屏。
@@ -43,7 +43,7 @@ await save({
   botId: 'bot-ph',
   secret: 'secret-ph',
   accessMode: 'whitelist',
-  allow: { users: [{ userid: USER, name: '测占位' }], groups: [] },
+  allow: { users: [{ userid: USER, name: '测预回复' }], groups: [] },
   // 合并窗口压到最短，别让测试等太久
   merge: { enabled: true, waitSec: 0.5, maxSec: 2 },
 })
@@ -56,7 +56,7 @@ check(server.subscribed, '订阅成功')
 
 /**
  * 喂一条消息，把接下来一段时间里所有回复文本收集起来。
- * 等到出现「不是占位」的那条（模型回复）为止，再多等一会儿收尾。
+ * 等到出现「不是预回复」的那条（模型回复）为止，再多等一会儿收尾。
  */
 async function feed(payload, { timeoutMs = 8000 } = {}) {
   await fetch(`http://127.0.0.1:${PORT}/reset`, { method: 'POST' }).catch(() => {})
@@ -75,10 +75,10 @@ async function feed(payload, { timeoutMs = 8000 } = {}) {
       const t = row?.body?.markdown?.content || ''
       if (!t) continue
       if (!texts.includes(t)) texts.push(t)
-      // 出现任意非占位文案 = 模型那条已经回来了
+      // 出现任意非预回复文案 = 模型那条已经回来了
       if (t !== 'emmm...' && t !== '秒回一句') answered = true
     }
-    // 模型回复之后再多看 600ms，确保没有迟到的占位
+    // 模型回复之后再多看 600ms，确保没有迟到的预回复
     if (answered) {
       const grace = Date.now() + 600
       while (Date.now() < grace) {
@@ -114,7 +114,7 @@ const cfg3 = await host.callRoute('/wecom-bot/api/config')
 check(cfg3.config.merge.placeholderOn === false, '关掉了', `placeholderOn=${cfg3.config.merge.placeholderOn}`)
 check(cfg3.config.merge.placeholder === '秒回一句', '关掉不抹掉文案（下次打开还是它）')
 const t3 = await feed({ text: '在吗', userid: USER, chattype: 'single' })
-check(!t3.includes('秒回一句') && !t3.includes('emmm...'), '关掉后没有任何占位', JSON.stringify(t3))
+check(!t3.includes('秒回一句') && !t3.includes('emmm...'), '关掉后没有任何预回复', JSON.stringify(t3))
 check(t3.some((t) => t.includes('想好了')), '关掉后答案照常给', JSON.stringify(t3))
 
 // ---- 4. 再打开，回到自定义文案 ----
@@ -122,11 +122,11 @@ await save({ merge: { placeholderOn: true } })
 const t4 = await feed({ text: '在吗', userid: USER, chattype: 'single' })
 check(t4.includes('秒回一句'), '重新打开还是那句自定义文案', JSON.stringify(t4))
 
-// ---- 4.5 占位图：面板从本地选图 → 存进插件目录 → 配置指向它 ----
+// ---- 4.5 预回复图：面板从本地选图 → 存进插件目录 → 配置指向它 ----
 // 只测接口和落盘，发图本身在 dev/placeholder-image.mjs 里（要 mock MCP，更细）。
 const PNG1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 const up1 = await host.callRoute('/wecom-bot/api/placeholder/image', { name: 'a.png', base64: PNG1x1 })
-check(up1.ok === true, '上传占位图成功', up1.message || '')
+check(up1.ok === true, '上传预回复图成功', up1.message || '')
 check(up1.bytes > 0, '存下来的字节数是对的', String(up1.bytes))
 const st1 = await host.callRoute('/wecom-bot/api/placeholder/state', {})
 check(st1.image && existsSync(st1.image), '配置里的路径指向真实文件', st1.image)
@@ -148,7 +148,7 @@ check(badExt.ok === false && /不支持/.test(badExt.message || ''), '非图片�
 
 // 清掉：配置清空 + 插件目录里那张删掉
 const cleared = await host.callRoute('/wecom-bot/api/placeholder/clear', {})
-check(cleared.ok === true, '清占位图成功', cleared.message || '')
+check(cleared.ok === true, '清预回复图成功', cleared.message || '')
 check(!existsSync(up2.path), '清掉后文件没了', up2.path)
 const st2 = await host.callRoute('/wecom-bot/api/placeholder/state', {})
 check(st2.image === '', '清掉后配置里没有路径了', JSON.stringify(st2.image))
@@ -170,4 +170,4 @@ if (problems.length) {
   for (const p of problems) console.log('   - ' + p)
   process.exit(1)
 }
-console.log('\n✅ 「收到消息先回一句」的开关行为正确')
+console.log('\n✅ 「预回复」的开关行为正确')

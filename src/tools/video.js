@@ -53,10 +53,17 @@ export function findFfmpeg({ dataDir } = {}) {
   if (process.env.FFMPEG_PATH) cands.push(process.env.FFMPEG_PATH)
   if (process.env.DSH_FFMPEG_DIR) cands.push(join(process.env.DSH_FFMPEG_DIR, 'ffmpeg.exe'))
   if (home) {
+    // `$DSH_HOME/tools/ffmpeg.exe` 这条必须有：DSH 桌面版自带工具就平铺在 tools/ 下
+    // （yt-dlp 也是这个位置，见 src/video/binaries.js 的 ytdlpCandidates）。
+    // 漏了它就会出现「机器上明明有 ffmpeg，面板却说没装」。
+    cands.push(join(home, 'tools', 'ffmpeg.exe'))
     cands.push(join(home, 'tools', 'ffmpeg', 'bin', 'ffmpeg.exe'))
     cands.push(join(home, 'bin', 'ffmpeg.exe'))
   }
-  if (dataDir) cands.push(join(dataDir, 'tools', 'ffmpeg', 'bin', 'ffmpeg.exe'))
+  if (dataDir) {
+    cands.push(join(dataDir, 'tools', 'ffmpeg.exe'))
+    cands.push(join(dataDir, 'tools', 'ffmpeg', 'bin', 'ffmpeg.exe'))
+  }
   const hit = cands.find((p) => p && existsSync(p))
   return hit || ''
 }
@@ -127,7 +134,69 @@ function compileOutputSpec(output) {
  *   换成浏览器自己抠直链那条路（见 src/video/douyin.js 顶部注释）。
  * @returns {Promise<{ok:object[], failed:object[], reason:string, dir:string, ffmpeg:string}>}
  */
-export async function buildVideoTools({ ctx, log, douyin } = {}) {
+/**
+ * 转写失败时自动重启一次本机 ASR，再重跑这次工具调用。
+ *
+ * 为什么要这一层：转写请求是**上游自己发的**，我们拦不到那个 fetch。但上游失败时会在
+ * 清单文本里留下 `transcript unavailable: …`（`transcript.source === 'asr-failed'`），
+ * 那是我们唯一能可靠感知「ASR 调用失败」的信号。
+ *
+ * 为什么上游自己不重启：它 `ensureAsr()` 探的是 baseUrl（本机 8080）的 /health，
+ * 而那个端口由**适配层**自答 —— 真正的 whisper（8081）挂了，适配层还活着，
+ * 于是上游认定「服务正常」，直接 keepAlive、永远不重启。这是探错层的老毛病
+ * （和启动时那个假就绪同源），只能由我们兜。
+ *
+ * 三条纪律：
+ *   · 只重试一次，绝不循环 —— 重跑一次分镜很贵（抽帧 + 转写几十秒）
+ *   · ASR 没配 / 没托管启动，就不折腾，只记日志说清为什么没救
+ *   · 成功失败都留日志：用户不一定会去看面板，但事后必须查得到
+ */
+export async function retryWithAsrRestart({ spec, args, exec, out, asr, log, retried = false }) {
+  const text = typeof out?.text === 'string' ? out.text : ''
+  // 只认上游那两个确切标记，别用宽泛的 /error/ —— 清单里本来就有各种 "error" 字样
+  const failed = text.includes('transcript unavailable') || text.includes('asr-failed')
+  if (!failed || retried || !asr || typeof asr.restart !== 'function') return out
+
+  const why = (text.match(/transcript unavailable:[^\n]*/) || ['（清单里没带原因）'])[0].trim()
+  log?.warn?.(`看视频：转写失败了（${why}），试着重启一次本机语音服务。`)
+  let restart
+  try {
+    restart = await asr.restart()
+  } catch (error) {
+    log?.error?.(`看视频：重启语音服务时抛错，放弃重试：${error.message}`)
+    return out
+  }
+  if (!restart?.ok) {
+    log?.warn?.(
+      `看视频：语音服务没重启起来，不再重试。原因：${restart?.message || '未知'}`
+      + (restart?.killed?.length ? `；已停掉 ${restart.killed.map((k) => k.pid).join('、')}` : '')
+      + (restart?.skipped?.length
+        ? `；没动的进程：${restart.skipped.map((s) => `${s.pid}（${s.why}）`).join('、')}`
+        : ''),
+    )
+    return out
+  }
+
+  log?.info?.('看视频：语音服务已重启，重跑这次调用。')
+  let again
+  try {
+    again = await spec.execute(args, exec)
+  } catch (error) {
+    log?.warn?.(`看视频：重启后重跑仍然失败（${error.message}）`)
+    return out
+  }
+  const againText = typeof again?.text === 'string' ? again.text : ''
+  if (againText.includes('transcript unavailable') || againText.includes('asr-failed')) {
+    // 重启都救不回来 —— 这才是真正需要人动手的情况，原因必须留下来
+    const still = (againText.match(/transcript unavailable:[^\n]*/) || ['（清单里没带原因）'])[0].trim()
+    log?.warn?.(`看视频：重启语音服务后还是转写失败，原因：${still}`)
+    return again
+  }
+  log?.info?.('看视频：重启后转写恢复正常。')
+  return again
+}
+
+export async function buildVideoTools({ ctx, log, douyin, asr } = {}) {
   const none = (reason) => ({ ok: [], failed: [], reason, dir: '', ffmpeg: '' })
   const found = findVideoPlugin()
   if (!found) {
@@ -173,7 +242,8 @@ export async function buildVideoTools({ ctx, log, douyin } = {}) {
           throw new Error(`抖音这条路走不通：${error.message}`)
         }
       }
-      return await spec.execute(args, exec)
+      const out = await spec.execute(args, exec)
+      return await retryWithAsrRestart({ spec, args, exec, out, asr, log })
     }
     return tool
   }

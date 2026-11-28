@@ -42,7 +42,7 @@ export function asLog(log) {
 
 /**
  * 起一个不需要等的异步任务，并保证它的失败不会变成 unhandledRejection。
- * 用法：fireAndForget(sendImage(...), '发送占位图', log)
+ * 用法：fireAndForget(sendImage(...), '预回复图发送', log)
  *
  * @param {Promise<unknown>} promise
  * @param {string} [what] 失败时日志里写什么
@@ -62,5 +62,12 @@ export function fireAndForget(promise, what = '', log = undefined, level = 'warn
 export function messageOf(error) {
   if (!error) return '未知错误'
   if (typeof error === 'string') return error
-  return error.message || String(error)
+  if (error.message) return error.message
+  // 企微错误有时是裸对象（{ code: 45009 } 这种），没有 message。
+  // 以前直接 String(error) → "[object Object]"，报错日志里一个字都没有，等于没报。
+  try {
+    const json = JSON.stringify(error)
+    if (json && json !== '{}') return json
+  } catch {}
+  return String(error)
 }

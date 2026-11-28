@@ -1,5 +1,10 @@
 // 日志：面板和文件双写，带级别和通道。
 // 面板要能实时看到「连上了没 / 收到什么 / 发出去什么」，排障全靠这个。
+//
+// ⚠ 别把不该静默的东西写成 debug。
+//   DEBUG 默认是关的（见 debugEnabled），写进去等于用户永远看不见。
+//   判断标准：这条信息能不能帮他/我们定位一个「他正在遭遇的」问题？
+//   能 → info 起步；只是喂给我们自己断案的细节 → debug。
 
 import { appendFileSync, existsSync, mkdirSync, statSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
@@ -10,8 +15,42 @@ const MAX_BYTES = 4 * 1024 * 1024
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 }
 
+/**
+ * debug 是否输出。默认关。
+ *
+ * 以前 createLogger 里默认 'info'，而 DEBUG 层的 10 < 20 —— 于是全仓
+ * 十几处 debug 一次都没写进文件，写的人以为自己记录了，出事时什么都没有。
+ * 现在显式成一个开关：清掉环境变量就恢复，不用改代码。
+ */
+const DEBUG_ON = (() => {
+  const v = String(process.env.WECOM_BOT_DEBUG || '').trim().toLowerCase()
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on'
+})()
+
+/**
+ * 当前是否输出 debug。可在面板上随时开关（不用改环境变量、不用重启）。
+ * 之所以做成可变的模块级状态：createLogger 只在启动时调一次，
+ * 如果级别写死在实例里，面板拨开关就得重启插件 —— 而出问题时恰恰不能重启。
+ */
+let debugOn = DEBUG_ON
+
+export function debugEnabled() {
+  return debugOn
+}
+
+export function setDebugEnabled(on) {
+  debugOn = Boolean(on)
+  return debugOn
+}
+
 /** 内存里留最近 N 条给面板看 */
 const RING_SIZE = 500
+/**
+ * ⚠ 这个 ring 必须活着跨「插件重载」，所以【不能】挪进 createLogger。
+ * 和 vault 那个 memory 相反：插件热重载后，面板要还能看见重载之前的日志
+ * （否则一重载就白屏，恰恰是出问题时最需要日志的时刻）。
+ * 它是进程级的单一真相，多个 logger 实例共享同一个 ring，这是对的。
+ */
 const ring = []
 export function recentLogs(limit = 200) {
   return ring.slice(-limit)
@@ -38,6 +77,7 @@ export function redact(value) {
       .replace(/sk-[A-Za-z0-9_-]{16,}/g, 'sk-***')
       .replace(/([?&](?:apikey|token|secret)=)[^&\s]+/gi, '$1***')
       .replace(/("(?:secret|token|apikey|password|aeskey)"\s*:\s*")[^"]*/gi, '$1***')
+      .replace(/(\bapikey=)[A-Za-z0-9_\-]{20,}/gi, '$1***')
   }
   if (Array.isArray(value)) return value.map(redact)
   if (typeof value === 'object') {
@@ -51,11 +91,13 @@ export function redact(value) {
 }
 
 export function createLogger(opts = {}) {
-  const minLevel = LEVELS[opts.level || 'info'] || 20
+  // opts.level 写死了就照它（测试/特殊场景）；否则跟着 debugOn 实时变。
+  const fixed = opts.level ? (LEVELS[opts.level] || 20) : 0
+  const minNow = () => fixed || (debugOn ? 10 : 20)
   const sink = []
 
   function write(level, tag, args) {
-    if ((LEVELS[level] || 20) < minLevel) return
+    if ((LEVELS[level] || 20) < minNow()) return
     const line = args
       .map((a) => {
         if (typeof a === 'string') return a

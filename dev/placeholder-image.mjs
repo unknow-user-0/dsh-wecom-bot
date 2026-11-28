@@ -1,10 +1,10 @@
-// 占位图：文字和图各有开关，配了哪个发哪个，都配了就都发。
+// 预回复图：文字和图各有开关，配了哪个发哪个，都配了就都发。
 //
 // 为什么单独一个测试：这条链路上有三个很容易写错的点，而且都不会在
 // 「只测文字」的 placeholder.mjs 里暴露：
-//   1. 只配图、关掉文字的人，必须仍然收到图占位（wantsPlaceholder 判断）
+//   1. 只配图、关掉文字的人，必须仍然收到图预回复（wantsPlaceholder 判断）
 //   2. 没配 disk/mail/doc 的人，media_upload 拿不到 media_id —— 图发不出去，
-//      但文字必须照发，不能整条占位都哑掉
+//      但文字必须照发，不能整条预回复都哑掉
 //   3. 同一张图不能在每条消息来的时候重传一遍（media_id 缓存）
 //
 // 跑法：node dev/placeholder-image.mjs
@@ -217,4 +217,4 @@ if (problems.length) {
   for (const p of problems) console.log('  - ' + p)
   process.exit(1)
 }
-console.log('\n✅ 占位图：文字/图片/都发/降级/缓存 都对')
+console.log('\n✅ 预回复图：文字/图片/都发/降级/缓存 都对')

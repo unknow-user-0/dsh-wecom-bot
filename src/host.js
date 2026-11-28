@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
 
 import { loadConfig, saveConfig, publicConfig, merge, DATA_DIR } from './core/config.js'
-import { createLogger, recentLogs, redact } from './core/logger.js'
+import { createLogger, recentLogs, redact, debugEnabled, setDebugEnabled } from './core/logger.js'
 import { fireAndForget } from './core/safe.js'
 import { record as recordActivity, recentEntries, chatStats, flushLog } from './core/activity.js'
 import * as chatlog from './core/chatlog.js'
@@ -442,7 +442,7 @@ export function apply(ctx) {
     ].join('\n')
   }
 
-  // ---------- 占位（收到消息先回一句：文字 / 图片 / 都发）----------
+  // ---------- 预回复（文字 / 图片 / 都发）----------
   const placeholder = createPlaceholder({
     getConfig,
     getClient: () => client,
@@ -768,7 +768,10 @@ export function apply(ctx) {
   // 两个人同时发抖音链接也不会互相冲掉；能力边界是「只读元数据」，故全档位给。
   const douyinWatch = createDouyinWatch({ getBrowser: () => browser, log: logger.child('douyin-watch') })
   const douyinTools = buildDouyinTools({ douyin: douyinWatch })
-  const videoReady = buildVideoTools({ ctx, log, douyin })
+  // 语音转写失败时自动重启一次：转写请求是上游自己发的，我们拦不到那个 fetch，
+  // 只能从它返回的清单里认出 asr-failed 再兜一层。为什么上游不自己重启：
+  // 它探的是 8080 的 /health，那是适配层自答的，whisper 挂了它也认为服务正常。
+  const videoReady = buildVideoTools({ ctx, log, douyin, asr })
     .catch((error) => {
       log.warn(`看视频能力没接上：${error.message}`)
       return { ok: [], failed: [], reason: `异常：${error.message}`, dir: '', ffmpeg: '' }
@@ -1064,7 +1067,20 @@ export function apply(ctx) {
     return { ...r, ok: r.ok }
   })
   route('/disconnect', async () => { await stopConnection(); return { ok: true } })
-  route('/logs', (req) => ({ ok: true, rows: recentLogs(300) }))
+  route('/logs', (req) => ({ ok: true, rows: recentLogs(300), debug: debugEnabled() }))
+  /**
+   * 面板上拨 debug 开关。
+   * 为什么要这个：debug 日志写了半天没人能看，等于没写。
+   * 让用户自己拨，出事时不用改环境变量、不用重启 —— 重启会丢掉现场。
+   */
+  route('/logs/debug', (req) => {
+    if (req.method === 'GET') return { ok: true, debug: debugEnabled() }
+    return readBody(req).then((body) => {
+      const on = setDebugEnabled(Boolean(body?.on))
+      logger.info('logger', on ? '面板打开了 debug 日志（会多写很多细节）' : '面板关掉了 debug 日志')
+      return { ok: true, debug: on }
+    })
+  })
   route('/activity', (req) => ({ ok: true, rows: recentEntries(200), stats: chatStats() }))
   route('/quota', () => ({ ok: true, usage: usageSnapshot(), config: cfg.quota }))
   route('/quota/reset', () => { resetUsage(); return { ok: true } })
@@ -1344,7 +1360,7 @@ export function apply(ctx) {
     } catch (error) {
       // 预演本身出错不该挡住上传（可能只是 sharp 没装好）。
       // 这种情况预览为空，面板就不显示那句说明，图照常存。
-      log.debug(`占位图预演失败：${error.message}`)
+      log.debug(`预回复图预演失败：${error.message}`)
     }
     if (preview && preview.sendable === false) {
       return { ok: false, message: preview.note, preview }
@@ -1377,7 +1393,7 @@ export function apply(ctx) {
         const mime = sniffImageMime(buf) || ''
         if (mime) preview = await describeImage(buf, mime)
       } catch (error) {
-        log.debug(`占位图状态预演失败：${error.message}`)
+        log.debug(`预回复图状态预演失败：${error.message}`)
       }
     }
     return {
@@ -1386,6 +1402,7 @@ export function apply(ctx) {
       bytes,
       preview,
       lastImageError: placeholder.lastImageError,
+      lastImageKind: placeholder.lastImageKind,
       lastImageAuthUrl: placeholder.lastImageAuthUrl,
       hasUpload: Boolean(await mcpUploadReady()),
     }

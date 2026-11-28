@@ -119,7 +119,17 @@ export function digestOf(v, comments = []) {
  * @param {Function} o.getBrowser () => 浏览器管理器（manager.js 那个）
  * @param {object}   o.log
  */
-export function createDouyinWatch({ getBrowser, log }) {
+/**
+ * 抖音网页接口的调用器：负责「连上专用浏览器 → 开独立标签页 → 在页面里 fetch」。
+ *
+ * 抽成独立工厂是因为下载路径（src/video/douyin.js）要拿同一个接口里的播放地址，
+ * 两处各抄一份必然走岔（签名参数、403 重试、没登录判定，抄漏一个就出玄学 bug）。
+ *
+ * @param {object} o
+ * @param {Function} o.getBrowser () => 浏览器管理器（manager.js 那个）
+ * @param {object}   o.log
+ */
+export function createDouyinApi({ getBrowser, log }) {
   /** 连上专用浏览器（不碰它当前的页面）。返回 browser 实例。 */
   async function ensure() {
     const bm = getBrowser?.()
@@ -171,6 +181,33 @@ export function createDouyinWatch({ getBrowser, log }) {
     return parseComments(await api(tab, '/aweme/v1/web/comment/list/', { aweme_id: id, cursor: 0, count: 20, item_type: 0 }))
   }
 
+  /** 详情接口的原始返回（下载路径要拿 play_addr，不走 normalizeAweme）。 */
+  async function detailRaw(tab, id) {
+    return api(tab, '/aweme/v1/web/aweme/detail/', { aweme_id: id })
+  }
+
+  /**
+   * 开一个独立标签页干活，干完关掉。
+   *
+   * 独立是硬要求：主人可能正用着这个浏览器，别的工具也可能同时在跑。
+   * 登录态在同一个资料目录里，所以新标签页天然是登录着的。
+   */
+  async function withTab(fn, opts = { ms: 30000 }) {
+    const b = await ensure()
+    return b.withTab(HOME, fn, opts)
+  }
+
+  return { ensure, api, detail, comments, detailRaw, withTab }
+}
+
+/**
+ * @param {object} o
+ * @param {Function} o.getBrowser () => 浏览器管理器（manager.js 那个）
+ * @param {object}   o.log
+ */
+export function createDouyinWatch({ getBrowser, log }) {
+  const dy = createDouyinApi({ getBrowser, log })
+
   /**
    * 打开一个抖音链接看看：读标题、分类、内容摘要和热评，返回给模型去总结。
    * 完整链接 / v.douyin.com 短链 / 纯视频 id 都认。
@@ -185,13 +222,10 @@ export function createDouyinWatch({ getBrowser, log }) {
       if (!id) throw new Error('短链没跳到视频页，可能已删除或失效')
     }
     log?.info?.(`抖音：读视频信息 ${id}`)
-    const b = await ensure()
-    // 开自己的标签页：跟主人正在看的页面、跟别的工具同时跑的活儿都互不干扰。
-    // 登录态在同一个资料目录里，所以新标签页天然是登录着的。
-    return b.withTab(HOME, async (tab) => {
+    return dy.withTab(async (tab) => {
       const [v, cs] = await Promise.all([
-        detail(tab, id),
-        comments(tab, id).catch(() => []), // 热评是锦上添花，读不到不算失败
+        dy.detail(tab, id),
+        dy.comments(tab, id).catch(() => []), // 热评是锦上添花，读不到不算失败
       ])
       return {
         ok: true,
@@ -200,7 +234,7 @@ export function createDouyinWatch({ getBrowser, log }) {
         title: v.title,
         url: videoLink(id),
       }
-    }, { ms: 30000 })
+    })
   }
 
   return { watch }

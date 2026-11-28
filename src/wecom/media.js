@@ -563,7 +563,7 @@ export async function describeImage(buffer, mimeType, requireFn, opts = {}) {
     // 明确说「不会发」，别写成「可能被拒」：说了「可能」用户就会去试，
     // 试完对面什么都没收到，他还以为是自己网不好。
     base.note = `这张图压到极限还有 ${(base.finalBytes / 1048576).toFixed(1)} MB，超过企微上限，`
-      + '占位时不会发这张图（文字照发）。换一张小点的，或者把它缩小后再传。'
+      + '预回复时不会发这张图（文字照发）。换一张小点的，或者把它缩小后再传。'
   } else if (pages > 1 && fPages > 1) {
     base.note = base.dropped
       ? `动图 ${pages} 帧太大（${(buffer.length / 1048576).toFixed(1)} MB），会自动抽成 ${fPages} 帧，`

@@ -111,7 +111,7 @@ export function normalizeInbound(frame, { botName = '' } = {}) {
 }
 
 /**
- * 下载并解密图片。失败不丢事件 —— 保留占位文本，让用户知道是图没取到而不是被忽略。
+ * 下载并解密图片。失败不丢事件 —— 保留预回复文本，让用户知道是图没取到而不是被忽略。
  * @param {object} raw 回调 body
  * @param {object} message normalizeInbound 的结果（就地改 images / text）
  */

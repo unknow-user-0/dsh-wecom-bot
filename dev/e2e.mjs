@@ -60,7 +60,7 @@ const feed = await fetch(`http://127.0.0.1:${PORT}/inbound`, {
 }).then((r) => r.json())
 console.log('⑥ 喂入站消息：', JSON.stringify(feed))
 
-// 等回复（第一条可能是合并窗口发的占位「emmm...」，要等真正的那条）
+// 等回复（第一条可能是合并窗口发的预回复「emmm...」，要等真正的那条）
 let got = null
 let placeholder = null
 for (let i = 0; i < 80; i++) {
@@ -73,7 +73,7 @@ for (let i = 0; i < 80; i++) {
   }
   if (got) break
 }
-console.log('⑦ 回复：', JSON.stringify(got), placeholder ? '（有过占位）' : '')
+console.log('⑦ 回复：', JSON.stringify(got), placeholder ? '（有过预回复）' : '')
 
 const log = await fetch(`http://127.0.0.1:${PORT}/log`).then((r) => r.json())
 console.log('⑧ 服务端记录：responded=' + log.responded.length + ' sent=' + log.sent.length + ' failed=' + log.failed.length)
