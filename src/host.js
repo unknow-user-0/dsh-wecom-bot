@@ -26,6 +26,7 @@ import { createVault, mcpRef, REF } from './core/vault.js'
 import { checkQuota, addUsage, tickMinute, usageSnapshot, resetUsage, estimateTokens } from './core/quota.js'
 import { createWecomClient, WecomApiError, WecomUncertainError } from './wecom/client.js'
 import { createMcpClient, MCP_SERVICES, validateMcpUrl, probeService } from './wecom/mcp.js'
+import { diagnoseChatId } from './wecom/diagnose.js'
 import { createHub, WORKSPACE_TITLE } from './chat/hub.js'
 import { checkAccess, autoRegister, deniedReply } from './chat/access.js'
 import { createMerger } from './chat/merge.js'
@@ -1253,6 +1254,21 @@ export function apply(ctx) {
     return probeService(mc, body.service)
   })
   route('/sessions', () => ({ ok: true, rows: Object.entries(hub.sessionMap()).map(([k, v]) => ({ key: k, ...v })) }))
+  /**
+   * 「排查」：出问题时点一下，拿到一份能直接发给维护者的结论。
+   *
+   * 为什么不是日志就够：图发不出去这件事，日志里只有企微的一句原文
+   * 「非法的 chat_id」，看不出「这个企业的会话 ID 和 userid 不是一个值」。
+   * 2026-11-28 那次是靠手工跑脚本才捞出来的，不该每次都那样。
+   * 只读：只列会话、只查通讯录，不发明消息。
+   */
+  route('/diagnose/chatid', async () => {
+    try {
+      return await diagnoseChatId({ cfg, mcpFor, log: logger.child('diagnose') })
+    } catch (error) {
+      return { ok: false, message: String(error?.message || error) }
+    }
+  })
 
   // ---------- 工作区目录迁移 ----------
   // 企微会话都落在同一个工作区里，工作区按「路径」认身份。

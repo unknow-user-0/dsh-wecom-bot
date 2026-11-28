@@ -11,6 +11,7 @@
 
 import { defineTool, str, int, bool } from './define.js'
 import { sendLocalFile, uploadToDisk, searchDisk, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { withChatId } from '../wecom/chatid.js'
 import { listSkills } from '../memory/skills.js'
 import { isOwner } from '../core/config.js'
 
@@ -120,7 +121,11 @@ export function buildTools(d) {
       const mc = await mcpFor?.('msg', chat.userId)
       if (!mc) return { ok: false, message: '没配 MCP 的 msg 服务，用不了真人身份发送。' }
       try {
-        const r = await mc.call('message_send', { chat_id: to, msg_type: 'text', text: String(text) })
+        // 单聊的 chat_id 有些企业要加密串，不是 userid。撞上「非法的 chat_id」才换算重试。
+        const r = await withChatId(
+          (id) => mc.call('message_send', { chat_id: id, msg_type: 'text', text: String(text) }),
+          { chatId: to, mcpFor, log: d.log, what: '以管理员身份发消息' },
+        )
         d.activity?.({ kind: 'out', chatId: to, text: `[以管理员身份] ${text}` })
         return { ok: true, message: `用你的身份发出去了。${r && r.errcode ? `（errcode ${r.errcode}）` : ''}` }
       } catch (error) {
@@ -188,7 +193,11 @@ export function buildTools(d) {
       const begin = m * 60000 > 6 * 86400e3 ? w.begin : localTime(now - m * 60000)
 
       try {
-        const r = await mc.call('chat_messages_list', { chat_id: target, begin_time: begin, end_time: w.end })
+        // 同上：单聊 chat_id 可能是加密串。查历史这条路也会踩，一并兜住。
+        const r = await withChatId(
+          (id) => mc.call('chat_messages_list', { chat_id: id, begin_time: begin, end_time: w.end }),
+          { chatId: target, mcpFor, log: d.log, what: '读群历史' },
+        )
         const list = r.message_list || r.messages || []
         if (!Array.isArray(list) || list.length === 0) {
           return { ok: true, message: `这个时间窗（${begin} ~ ${w.end}）里没有消息。注意：空不代表没聊过，也可能是这段时间真的没人说话。` }

@@ -23,6 +23,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { uploadMedia, isImagePath, MAX_FILE_BYTES } from '../wecom/outbound.js'
+import { withChatId } from '../wecom/chatid.js'
 import { helpUrl } from '../wecom/mcp.js'
 import { asLog, fireAndForget, messageOf } from '../core/safe.js'
 
@@ -114,7 +115,10 @@ export function describeFailure(error, kind) {
     case 'image':
       return `这张图本身发不出去：${raw}（换一张图就会重新试）`
     case 'chat':
-      return `发不进去的是这个会话，不是图：${raw}（换图没用，检查这个会话还在不在）`
+      // 40073「非法的 chat_id」说的是「这个值形态不对」，不是「会话没了」。
+      // 原来的文案让人去查会话在不在，是误诊 —— 真因是有些企业单聊的 chat_id 不是 userid。
+      return `企微不认这个会话 ID：${raw}（换图没用。这个企业的单聊会话 ID 和 userid 不是一个值，` +
+        '插件已经去通讯录换过一次还是没对上 —— 要么没配 MCP 的 contact 服务，要么这个人还没跟机器人说过话）'
     case 'remote':
       return `外部一时不通：${raw}（等会儿会自动重试）`
     default:
@@ -228,16 +232,24 @@ export function createPlaceholder({ getConfig, getClient, mcpFor, log: logRaw, c
       // 注意两边字段名不是一套：MCP 是 chat_id/msg_type，长连接是 chatid/chat_type/msgtype。
       const msg = await mcpFor?.('msg')
       if (msg) {
-        await msg.call('message_aibot_send', {
-          chat_id: chat.chatId,
-          msg_type: 'image',
-          image: { media_id: mediaId },
-        })
+        // 单聊 chat_id 有些企业要的是加密串，不是回调里那个 from.userid。
+        // 撞上「非法的 chat_id」才去通讯录换一次再重发，平时零额外请求。
+        await withChatId(
+          (id) => msg.call('message_aibot_send', {
+            chat_id: id,
+            msg_type: 'image',
+            image: { media_id: mediaId },
+          }),
+          { chatId: chat.chatId, mcpFor, log, what: '预回复图' },
+        )
       } else {
-        await client.send(chat.chatId, chat.kind === 'group' ? 2 : 1, {
-          msgtype: 'image',
-          image: { media_id: mediaId },
-        })
+        await withChatId(
+          (id) => client.send(id, chat.kind === 'group' ? 2 : 1, {
+            msgtype: 'image',
+            image: { media_id: mediaId },
+          }),
+          { chatId: chat.chatId, mcpFor, log, what: '预回复图（长连接）' },
+        )
       }
       failReason = ''
       authHint = ''

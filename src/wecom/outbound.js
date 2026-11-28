@@ -17,6 +17,7 @@
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { asLog } from '../core/safe.js'
+import { withChatId, isInvalidChatId } from './chatid.js'
 
 /** 单文件上限：草稿里定 20 MB，base64 后约 27 MB，还在 MCP 请求体承受范围内 */
 export const MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -154,12 +155,33 @@ export async function sendLocalFile({ path, chatId, chatType, msgType }, { mcpFo
   else body.file = { media_id: up.mediaId }
 
   try {
-    const r = await msg.call('message_aibot_send', body)
+    // 单聊的 chat_id 有些企业要的是加密串，不是回调里那个 from.userid。
+    // 平时行为和以前一模一样：只有真撞上「非法的 chat_id」才会去通讯录换一次再重发。
+    const r = await withChatId(
+      (id) => msg.call('message_aibot_send', { ...body, chat_id: id }),
+      { chatId, mcpFor, log: logRaw, what: `发文件（${fileName}）` },
+    )
     log('info', `文件已发：${fileName}（${up.bytes} 字节，${type}）`)
     return { ok: true, mediaId: up.mediaId, bytes: up.bytes, fileName, raw: r }
   } catch (error) {
-    throw new SendFileError(`发送失败：${error.message}`, 'send_failed')
+    throw new SendFileError(sendFailedMessage(error, chatId), 'send_failed')
   }
+}
+
+/**
+ * 发失败的说明。把「值不对」和「会话不在」分开说 ——
+ * 40073 只说明形态不对，让人去查会话在不在纯属误导。
+ */
+function sendFailedMessage(error, chatId) {
+  if (isInvalidChatId(error)) {
+    return (
+      `企微不认这个会话 ID（原值 ${chatId}）：${error.message}\n` +
+      '这个企业的单聊会话 ID 和 userid 不是一个值，而通讯录里也没换成唯一的一个 —— ' +
+      '要么这个人还没跟机器人说过话，要么管理员的 userid 不是企微后台那个真正的 UserID，' +
+      '要么没配 MCP 的 contact 服务。'
+    )
+  }
+  return `发送失败：${error.message}`
 }
 
 /**

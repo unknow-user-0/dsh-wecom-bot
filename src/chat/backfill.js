@@ -17,6 +17,7 @@
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { DATA_DIR } from '../core/config.js'
+import { withChatId } from '../wecom/chatid.js'
 
 const WATER_FILE = join(DATA_DIR, 'watermarks.json')
 
@@ -172,11 +173,15 @@ export function createBackfill({ log, mcpFor, appendOnly, getConfig }) {
     const begin = localTime(from)
     const truncated = at > 0 && now - at > MAX_SPAN_MS
 
-    const r = await mc.call('chat_messages_list', {
-      chat_id: chat.chatId,
-      begin_time: begin < w.begin ? w.begin : begin,
-      end_time: w.end,
-    })
+    // 单聊 chat_id 有些企业要加密串，不是 userid —— 撞上「非法的 chat_id」才换算重试。
+    const r = await withChatId(
+      (id) => mc.call('chat_messages_list', {
+        chat_id: id,
+        begin_time: begin < w.begin ? w.begin : begin,
+        end_time: w.end,
+      }),
+      { chatId: chat.chatId, mcpFor, log, what: '补拉历史' },
+    )
     const list = Array.isArray(r.message_list) ? r.message_list : (Array.isArray(r.messages) ? r.messages : [])
     if (!list.length) {
       touch(chat, '')

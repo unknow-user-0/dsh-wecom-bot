@@ -1604,6 +1604,7 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
         else toast(r?.message || '没切过来', 'err')
       }
       return h('div', { className: 'wb-page' },
+        h(Diagnose, { toast }),
         h(Card, {
           title: '插件日志', hint: '密钥都会被抹掉再落盘。',
           right: h('div', { className: 'wb-row' },
@@ -1620,6 +1621,47 @@ body[data-ds-dark-theme] .wb-root{--wb-brand:#3ddc84;--wb-brand-2:#07c160;--wb-d
               h('span', { className: cx('lv', l.level) }, l.level),
               h('span', null, l.text))))
             : h(Empty, null, '还没有日志。')))
+    }
+
+    // 排查卡片：出问题时点一下，直接给出「能不能正常发」和原因。
+    // 为什么放这儿：它和日志是同一件事（事后查原因），用户找不到第二个地方去找。
+    // 结果里所有 ID 都是脱敏的 —— 这份东西是要发给人看的，不是给自己看的。
+    function Diagnose({ toast }) {
+      const [r, setR] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const run = async () => {
+        setBusy(true)
+        const out = await get('/diagnose/chatid')
+        setBusy(false)
+        if (!out || out.ok === false) { toast(out?.message || '检查没跑起来', 'err'); return }
+        setR(out)
+      }
+      const copy = async () => {
+        const text = (r?.lines || []).join('\n')
+        try {
+          await navigator.clipboard.writeText(text)
+          toast('报告复制好了', 'ok')
+        } catch {
+          // 剪贴板权限被浏览器挡了：让用户自己选中，总比什么都不做好
+          toast('复制不了，手动选中下面的文字吧', 'warn')
+        }
+      }
+      const levelTag = r ? (r.level === 'ok' ? 'ok' : r.level === 'warn' ? 'warn' : 'err') : ''
+      return h(Card, {
+        title: '排查：图片和文件发得出去吗',
+        hint: '只读：只列会话、只查通讯录，不发送任何消息。',
+        right: h('div', { className: 'wb-row' },
+          r ? h('span', { className: cx('wb-tag', levelTag) },
+            r.level === 'ok' ? '看着没问题' : r.level === 'warn' ? '有需要注意的' : '有问题') : null,
+          r ? h(Btn, { sm: true, kind: 'ghost', onClick: () => void copy() }, '复制报告') : null,
+          h(Btn, { sm: true, kind: r ? 'ghost' : 'primary', onClick: () => void run(), disabled: busy }, busy ? '检查中…' : r ? '再查一次' : '开始检查')),
+      },
+        !r
+          ? h('p', { className: 'wb-hint' }, '发图发文件失败、或者只是想知道这台机器能不能发，点上面那个按钮。检查完会给出一份可以直接复制发出去的结论。')
+          : h('div', null,
+            h('div', { className: 'wb-logs', style: { maxHeight: 320 } },
+              (r.lines || []).map((l, i) => h('div', { key: i, className: 'wb-log' }, h('span', null, l)))),
+            h('p', { className: 'wb-hint' }, '上面的 ID 都做过脱敏。要是结论说「有问题」，把这段整份复制给维护者就够了。')))
     }
 
     // ---------------- 向导 ----------------
